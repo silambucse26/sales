@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle } from "lucide-react";
+import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle, LayoutGrid, Table2 } from "lucide-react";
 import { useCommitments, useIntakes, useTeamMembers, aggregateCustomers, fmtINR, effectiveStatus, type CustomerStats, type Commitment, type IntakeRow, type TeamMember } from "@/lib/sales-data";
 import { useAuth } from "@/lib/auth-context";
 import { salesCode } from "@/lib/auth";
@@ -23,11 +23,13 @@ function Customers() {
   const { data: commitments = [] } = useCommitments();
   const { data: intakes = [] } = useIntakes();
   const { data: members = [] } = useTeamMembers();
+  const { user } = useAuth();
   const customers = useMemo(() => aggregateCustomers(commitments, intakes), [commitments, intakes]);
   const [q, setQ] = useState("");
   const [repFilter, setRepFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
   const [open, setOpen] = useState<CustomerStats | null>(null);
+  const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
   const repOptions = useMemo(() => Array.from(new Set(commitments.map((c) => (c.salesperson ?? "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [commitments]);
   const filtered = customers.filter((c) => {
     if (q && !c.name.toLowerCase().includes(q.toLowerCase())) return false;
@@ -39,6 +41,28 @@ function Customers() {
     return true;
   });
   const selectedCustomer = open ? (customers.find((c) => c.name === open.name) ?? open) : null;
+  const recentAdds = useMemo(() => {
+    return intakes
+      .filter((i) => !user?.id || i.user_id === user.id)
+      .map((i) => {
+        const ext = (i.extracted ?? {}) as {
+          customer?: string | null;
+          salesperson?: string | null;
+          intake_code?: string | null;
+          summary?: string | null;
+        };
+        return {
+          id: i.id,
+          customer: ext.customer?.trim() || "Unknown customer",
+          salesperson: ext.salesperson?.trim() || "You",
+          code: ext.intake_code ?? "—",
+          summary: ext.summary ?? i.raw_text ?? "",
+          createdAt: i.created_at,
+        };
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 20);
+  }, [intakes, user?.id]);
 
   return (
     <div className="space-y-6">
@@ -47,7 +71,7 @@ function Customers() {
           <h1 className="text-3xl font-bold tracking-tight"><span className="gradient-text">Customers</span></h1>
           <p className="text-sm text-muted-foreground">Account intelligence — relationship, probability, and risk.</p>
         </div>
-        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[220px_200px_170px_auto]">
+        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[220px_200px_170px_auto_auto]">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search customer..." className="pl-8" />
@@ -71,10 +95,24 @@ function Customers() {
               <XCircle className="h-4 w-4" /> Clear
             </Button>
           )}
+          <div className="inline-flex rounded-md border border-border bg-card p-0.5">
+            <Button type="button" size="sm" variant={viewMode === "cards" ? "secondary" : "ghost"} onClick={() => setViewMode("cards")}>
+              <LayoutGrid className="h-4 w-4" />
+            </Button>
+            <Button type="button" size="sm" variant={viewMode === "table" ? "secondary" : "ghost"} onClick={() => setViewMode("table")}>
+              <Table2 className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <RecentlyAdded customers={recentAdds} onOpen={(name) => {
+          const match = customers.find((c) => c.name === name);
+          if (match) setOpen(match);
+        }} />
+
+        {viewMode === "cards" ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {filtered.length === 0 && <p className="col-span-full py-12 text-center text-sm text-muted-foreground">No customers yet.</p>}
         {filtered.map((c) => {
           const risk = c.missed > 0 ? "High" : c.open > 2 ? "Medium" : "Low";
@@ -107,6 +145,7 @@ function Customers() {
             </button>
           );
         })}
+        </div> : <CustomerTable customers={filtered} onOpen={setOpen} />}
       </div>
 
       <Dialog open={!!open} onOpenChange={(v) => !v && setOpen(null)}>
@@ -119,12 +158,97 @@ function Customers() {
   );
 }
 
+function RecentlyAdded({
+  customers,
+  onOpen,
+}: {
+  customers: Array<{ id: string; customer: string; salesperson: string; code: string; summary: string; createdAt: string }>;
+  onOpen: (customerName: string) => void;
+}) {
+  return (
+    <Card className="card-soft border-0 shadow-none xl:sticky xl:top-4 xl:self-start">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <CalendarDays className="h-4 w-4 text-primary" /> Recently added
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {customers.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">No recent customer intakes.</p>
+        ) : (
+          customers.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onOpen(item.customer)}
+              className="w-full rounded-lg border border-border bg-background/50 p-2.5 text-left text-sm hover:border-primary/40 hover:bg-primary/5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-semibold">{item.customer}</span>
+                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[10px] text-primary">
+                  {item.code}
+                </span>
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</div>
+              <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.summary}</div>
+            </button>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CustomerTable({ customers, onOpen }: { customers: CustomerStats[]; onOpen: (customer: CustomerStats) => void }) {
+  if (customers.length === 0) {
+    return <p className="py-12 text-center text-sm text-muted-foreground">No customers yet.</p>;
+  }
+
+  return (
+    <Card className="card-soft border-0 shadow-none">
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <div className="min-w-[840px]">
+            <div className="grid grid-cols-[1.6fr_1fr_1fr_1fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div>Customer</div>
+              <div>Salesperson</div>
+              <div className="text-right">Pipeline</div>
+              <div className="text-right">Won</div>
+              <div className="text-right">Open</div>
+              <div className="text-right">Missed</div>
+              <div className="text-right">Popup</div>
+            </div>
+            {customers.map((c) => (
+              <button
+                key={c.name}
+                type="button"
+                onClick={() => onOpen(c)}
+                className="grid w-full grid-cols-[1.6fr_1fr_1fr_1fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-border/70 px-4 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
+              >
+                <div className="truncate font-medium">{c.name}</div>
+                <div className="truncate text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                <div className="text-right font-semibold text-info">{fmtINR(c.pipeline)}</div>
+                <div className="text-right font-semibold text-success">{fmtINR(c.won)}</div>
+                <div className="text-right">{c.open}</div>
+                <div className="text-right">{c.missed}</div>
+                <div className="text-right text-primary">Open</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function CustomerProfile({ cust, commitments, intakes, members }: { cust: CustomerStats; commitments: Commitment[]; intakes: IntakeRow[]; members: TeamMember[] }) {
   const own = (commitments ?? []).filter((c) => (c.customer ?? "").trim() === cust.name);
   const ownIntakes = (intakes ?? []).filter((i) => {
     const ext = (i.extracted ?? {}) as { customer?: string };
     return ext.customer?.trim() === cust.name;
   });
+  const latestIntake = [...ownIntakes].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const latestExt = (latestIntake?.extracted ?? {}) as { intake_code?: string };
   const products = Array.from(new Set(own.map((c) => c.product).filter(Boolean))) as string[];
   const { user, role, name, phone } = useAuth();
   const myCode = salesCode(name, phone);
@@ -171,13 +295,13 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Pipeline" value={fmtINR(cust.pipeline)} />
         <Stat label="Won" value={fmtINR(cust.won)} />
-        <Stat label="Relationship" value={`${cust.relationship}`} />
-        <Stat label="Buying prob." value={`${cust.buyingProb}%`} />
+        <Stat label="Customer visit no." value={latestExt.intake_code ?? (ownIntakes.length ? `#${ownIntakes.length}` : "—")} />
+        <Stat label="Visits" value={ownIntakes.length || "—"} />
       </div>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 text-center text-xs">
         <Mini label="Open" value={cust.open} />
         <Mini label="Missed" value={cust.missed} />
-        <Mini label="Competitor" value={cust.competitor ?? "—"} />
+        <Mini label="Latest visit" value={latestIntake ? formatDateTime(latestIntake.created_at) : "—"} />
         <Mini label="Products" value={products.length || "—"} />
       </div>
 
@@ -237,12 +361,20 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
               <div key={`i-${idx}`} className="flex items-start gap-3 rounded-lg border border-border bg-background/50 p-2.5 text-sm">
                 <span className="mt-1 h-2 w-2 rounded-full bg-primary" />
                 <div className="min-w-0 flex-1"><div className="truncate font-medium capitalize">{row.i.source} note</div><div className="line-clamp-2 text-xs text-muted-foreground">{row.i.raw_text}</div></div>
+                <div className="text-right text-xs text-muted-foreground">
+                  <div>{((row.i.extracted ?? {}) as { intake_code?: string }).intake_code ?? "—"}</div>
+                  <div>{formatDateTime(row.i.created_at)}</div>
+                </div>
               </div>
             ))}
         </div>
       </div>
     </div>
   );
+}
+
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 function Mini({ label, value }: { label: string; value: string | number }) {

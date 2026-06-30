@@ -14,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Calendar } from "@/components/ui/calendar";
 import {
   ArrowUpRight,
@@ -35,6 +36,7 @@ import {
   Save,
   X,
   Building2,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -43,6 +45,8 @@ import {
   useTeamMembers,
   aggregateCustomers,
   type Commitment,
+  type IntakeRow,
+  type CustomerStats,
   effectiveStatus,
   fmtINR,
 } from "@/lib/sales-data";
@@ -176,6 +180,26 @@ function monthLabel(key: string) {
   const [y, m] = key.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleString("en-IN", { month: "short", year: "2-digit" });
 }
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+function csvEscape(value: unknown) {
+  const text = value === null || value === undefined ? "" : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+function downloadCsv(fileName: string, headers: string[], rows: Array<Array<unknown>>) {
+  const csv = [headers, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 function commitmentMonth(c: Commitment) {
   return monthKey(c.promise_date ?? c.created_at);
 }
@@ -267,6 +291,7 @@ function DashboardPage() {
     return Array.from(set).sort().reverse();
   }, [displayCommitments]);
   const [selectedMonth, setSelectedMonth] = useState<string>(thisMonthKey);
+  const [dashboardCustomer, setDashboardCustomer] = useState<CustomerStats | null>(null);
 
   const monthCommits = displayCommitments.filter((c) => commitmentMonth(c) === selectedMonth);
   const customers = useMemo(
@@ -426,6 +451,74 @@ function DashboardPage() {
     .sort((a, b) => (a.promise_date ?? "").localeCompare(b.promise_date ?? ""))
     .slice(0, 6);
 
+  function downloadDailyReport() {
+    const todayIntakes = customerIntakes.filter((i) => i.created_at.slice(0, 10) === today);
+    const rows = [
+      ...todays.map((c) => [
+        "commitment",
+        c.customer ?? "",
+        c.salesperson ?? "",
+        c.title,
+        c.product ?? "",
+        c.promise_date ?? "",
+        c.status,
+        c.risk_level ?? "",
+        Number(c.expected_revenue ?? 0),
+        formatDateTime(c.created_at),
+      ]),
+      ...todayIntakes.map((i) => {
+        const ext = (i.extracted ?? {}) as { customer?: string; salesperson?: string; product?: string; intake_code?: string; expected_revenue?: number; summary?: string };
+        return [
+          "intake",
+          ext.customer ?? "",
+          ext.salesperson ?? "",
+          ext.summary ?? i.raw_text ?? "",
+          ext.product ?? "",
+          ext.intake_code ?? "",
+          i.source,
+          "",
+          Number(ext.expected_revenue ?? 0),
+          formatDateTime(i.created_at),
+        ];
+      }),
+    ];
+    downloadCsv(`daily-report-${today}.csv`, ["Type", "Customer", "Salesperson", "Detail", "Product", "Date or visit no", "Status or source", "Risk", "Amount INR", "Created"], rows);
+  }
+
+  function downloadMonthlyReport() {
+    const monthlyIntakes = customerIntakes.filter((i) => monthKey(i.created_at) === selectedMonth);
+    const rows = [
+      ...monthCommits.map((c) => [
+        "commitment",
+        c.customer ?? "",
+        c.salesperson ?? "",
+        c.title,
+        c.product ?? "",
+        c.promise_date ?? "",
+        c.status,
+        c.risk_level ?? "",
+        Number(c.expected_revenue ?? 0),
+        formatDateTime(c.created_at),
+      ]),
+      ...monthlyIntakes.map((i) => {
+        const ext = (i.extracted ?? {}) as { customer?: string; salesperson?: string; product?: string; intake_code?: string; expected_revenue?: number; summary?: string };
+        return [
+          "intake",
+          ext.customer ?? "",
+          ext.salesperson ?? "",
+          ext.summary ?? i.raw_text ?? "",
+          ext.product ?? "",
+          ext.intake_code ?? "",
+          i.source,
+          "",
+          Number(ext.expected_revenue ?? 0),
+          formatDateTime(i.created_at),
+        ];
+      }),
+    ];
+    downloadCsv(`monthly-report-${selectedMonth}.csv`, ["Type", "Customer", "Salesperson", "Detail", "Product", "Date or visit no", "Status or source", "Risk", "Amount INR", "Created"], rows);
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -459,6 +552,16 @@ function DashboardPage() {
             </Select>
           </div>
           <TargetEditor current={monthlyTargetPerRep} canEdit={isPrivileged} />
+          {isPrivileged && (
+            <>
+              <Button variant="outline" onClick={downloadDailyReport}>
+                <Download className="mr-1.5 h-4 w-4" /> Daily report
+              </Button>
+              <Button variant="outline" onClick={downloadMonthlyReport}>
+                <Download className="mr-1.5 h-4 w-4" /> Monthly report
+              </Button>
+            </>
+          )}
           <Button asChild variant="outline">
             <Link to="/commitments">Commitments</Link>
           </Button>
@@ -655,7 +758,28 @@ function DashboardPage() {
         <HeadRevenueCharts reps={monthReps} monthLabel={monthLabel(selectedMonth)} />
       )}
 
-      {isPrivileged && <CustomerDashboard customers={customers} />}
+      {isPrivileged && (
+        <CustomerDashboard
+          customers={customers}
+          intakes={customerIntakes}
+          onOpenCustomer={setDashboardCustomer}
+        />
+      )}
+
+      <Dialog open={!!dashboardCustomer} onOpenChange={(v) => !v && setDashboardCustomer(null)}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{dashboardCustomer?.name}</DialogTitle>
+          </DialogHeader>
+          {dashboardCustomer && (
+            <DashboardCustomerPopup
+              customer={dashboardCustomer}
+              commitments={displayCommitments}
+              intakes={customerIntakes}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Per-rep target tracker (privileged) or self card */}
       {isPrivileged ? (
@@ -1326,7 +1450,15 @@ function HeadRevenueCharts({
   );
 }
 
-function CustomerDashboard({ customers }: { customers: ReturnType<typeof aggregateCustomers> }) {
+function CustomerDashboard({
+  customers,
+  intakes,
+  onOpenCustomer,
+}: {
+  customers: ReturnType<typeof aggregateCustomers>;
+  intakes: IntakeRow[];
+  onOpenCustomer: (customer: CustomerStats) => void;
+}) {
   const topCustomers = customers.slice(0, 8);
   const totalPipeline = customers.reduce((s, c) => s + c.pipeline, 0);
   const totalWon = customers.reduce((s, c) => s + c.won, 0);
@@ -1355,32 +1487,105 @@ function CustomerDashboard({ customers }: { customers: ReturnType<typeof aggrega
         ) : (
           <div className="overflow-x-auto">
             <div className="min-w-[720px] rounded-lg border border-border">
-              <div className="grid grid-cols-[1.5fr_1fr_1fr_1fr_0.8fr_0.8fr] gap-3 border-b border-border bg-muted/30 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="grid grid-cols-[1.5fr_1fr_0.8fr_1fr_1fr_0.8fr_0.8fr] gap-3 border-b border-border bg-muted/30 px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 <div>Customer</div>
                 <div>Sales member</div>
+                <div className="text-right">Visit no</div>
                 <div className="text-right">Pipeline</div>
                 <div className="text-right">Revenue won</div>
                 <div className="text-right">Relation</div>
                 <div className="text-right">Buy prob.</div>
               </div>
-              {topCustomers.map((c) => (
-                <div
+              {topCustomers.map((c) => {
+                const latest = latestCustomerIntake(c.name, intakes);
+                const latestCode = ((latest?.extracted ?? {}) as { intake_code?: string }).intake_code ?? "—";
+                return (
+                <button
                   key={c.name}
-                  className="grid grid-cols-[1.5fr_1fr_1fr_1fr_0.8fr_0.8fr] gap-3 border-b border-border/70 px-3 py-2 text-sm last:border-b-0"
+                  type="button"
+                  onClick={() => onOpenCustomer(c)}
+                  className="grid w-full grid-cols-[1.5fr_1fr_0.8fr_1fr_1fr_0.8fr_0.8fr] gap-3 border-b border-border/70 px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
                 >
                   <div className="truncate font-medium">{c.name}</div>
                   <div className="truncate text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                  <div className="text-right font-mono text-xs text-primary">{latestCode}</div>
                   <div className="text-right font-semibold text-info">{fmtINR(c.pipeline)}</div>
                   <div className="text-right font-semibold text-success">{fmtINR(c.won)}</div>
                   <div className="text-right">{c.relationship}%</div>
                   <div className="text-right">{c.buyingProb}%</div>
-                </div>
-              ))}
+                </button>
+              )})}
             </div>
           </div>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function latestCustomerIntake(customerName: string, intakes: IntakeRow[]) {
+  return intakes
+    .filter((i) => {
+      const ext = (i.extracted ?? {}) as { customer?: string };
+      return ext.customer?.trim() === customerName;
+    })
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+}
+
+function DashboardCustomerPopup({
+  customer,
+  commitments,
+  intakes,
+}: {
+  customer: CustomerStats;
+  commitments: Commitment[];
+  intakes: IntakeRow[];
+}) {
+  const ownCommitments = commitments.filter((c) => (c.customer ?? "").trim() === customer.name);
+  const ownIntakes = intakes.filter((i) => {
+    const ext = (i.extracted ?? {}) as { customer?: string };
+    return ext.customer?.trim() === customer.name;
+  });
+  const latest = latestCustomerIntake(customer.name, intakes);
+  const latestExt = (latest?.extracted ?? {}) as { intake_code?: string; summary?: string };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <RepStat label="Visit no" value={latestExt.intake_code ?? (ownIntakes.length ? `#${ownIntakes.length}` : "—")} tone="info" />
+        <RepStat label="Visits" value={String(ownIntakes.length)} tone="muted" />
+        <RepStat label="Pipeline" value={fmtINR(customer.pipeline)} tone="info" />
+        <RepStat label="Won" value={fmtINR(customer.won)} tone="success" />
+      </div>
+      <div className="rounded-lg border border-border bg-background/50 p-3 text-sm">
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Latest intake</div>
+        <div className="font-medium">{latest ? formatDateTime(latest.created_at) : "No intake captured"}</div>
+        <p className="mt-1 line-clamp-3 text-muted-foreground">{latestExt.summary ?? latest?.raw_text ?? "—"}</p>
+      </div>
+      <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+        {[...ownCommitments.map((c) => ({ type: "commitment" as const, when: c.created_at, c })), ...ownIntakes.map((i) => ({ type: "intake" as const, when: i.created_at, i }))]
+          .sort((a, b) => b.when.localeCompare(a.when))
+          .slice(0, 12)
+          .map((row, idx) => row.type === "commitment" ? (
+            <div key={`dc-${idx}`} className="flex items-center gap-3 rounded-lg border border-border bg-background/50 p-2.5 text-sm">
+              <RiskDot level={row.c.risk_level} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{row.c.title}</div>
+                <div className="truncate text-xs text-muted-foreground">{row.c.promise_date ?? "—"} · {row.c.salesperson ?? "—"}</div>
+              </div>
+              <div className="text-xs font-semibold">{fmtINR(row.c.expected_revenue ?? 0)}</div>
+            </div>
+          ) : (
+            <div key={`di-${idx}`} className="flex items-center gap-3 rounded-lg border border-border bg-background/50 p-2.5 text-sm">
+              <span className="h-2.5 w-2.5 rounded-full bg-primary" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{((row.i.extracted ?? {}) as { intake_code?: string }).intake_code ?? "Intake"}</div>
+                <div className="truncate text-xs text-muted-foreground">{formatDateTime(row.i.created_at)}</div>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
   );
 }
 

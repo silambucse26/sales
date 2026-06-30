@@ -104,13 +104,14 @@ function SalesTeam() {
   const { data: intakes = [] } = useIntakes();
   const { data: members = [] } = useTeamMembers();
   const { data: monthlyTargetPerRep = DEFAULT_MONTHLY_TARGET_PER_REP } = useMonthlyTarget();
-  const { role, name, user } = useAuth();
+  const { role, name, user, phone } = useAuth();
   const { data: notifications = [] } = useNotifications();
   const qc = useQueryClient();
   const doChangeRole = useServerFn(changeUserRole);
   const getLoginUsers = useServerFn(listLoginUsers);
   const isMember = role === "sales_member";
   const isBH = role === "business_head";
+  const selfView = !isBH;
   const [q, setQ] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [activityFilter, setActivityFilter] = useState("all");
@@ -141,6 +142,18 @@ function SalesTeam() {
     queryFn: () => getLoginUsers(),
     enabled: isBH,
   });
+  const loginUsersWithStats = useMemo(() => {
+    return loginUsers
+      .map((u) => {
+        const ownRows = commitments.filter(
+          (c) =>
+            c.assigned_to === u.id ||
+            (c.salesperson ?? "").trim().toLowerCase() === u.name.toLowerCase(),
+        );
+        return { ...u, stats: statsForCommitments(u.name, ownRows) };
+      })
+      .sort((a, b) => b.stats.won + b.stats.pipeline - (a.stats.won + a.stats.pipeline));
+  }, [commitments, loginUsers]);
 
   const monthByRep = useMemo(() => {
     const current = new Date();
@@ -158,6 +171,14 @@ function SalesTeam() {
     return m;
   }, [commitments, ownerNameFor]);
   const reps = useMemo(() => {
+    if (selfView) {
+      const ownRows = commitments.filter(
+        (c) =>
+          c.assigned_to === user?.id ||
+          (c.salesperson ?? "").trim().toLowerCase() === (name ?? "").toLowerCase(),
+      );
+      return [statsForCommitments(name ?? "You", ownRows)];
+    }
     if (isMember) return [statsForCommitments(name ?? "You", commitments)];
     const assignedCommitmentIds = new Set<string>();
     const rows = members
@@ -177,8 +198,16 @@ function SalesTeam() {
       commitments.filter((c) => !assignedCommitmentIds.has(c.id)),
     ).map((r) => ({ ...r }));
     return [...rows, ...unmatched].sort((a, b) => b.score - a.score);
-  }, [commitments, isMember, members, name]);
+  }, [commitments, isMember, members, name, selfView, user?.id]);
   const merged = useMemo(() => {
+    if (selfView)
+      return reps.map((r) => ({
+        ...r,
+        phone: phone ?? undefined,
+        memberId: user?.id,
+        memberRole: role,
+        roleLabel: role ? ROLE_LABELS[role] : undefined,
+      }));
     if (isMember)
       return reps.map((r) => ({
         ...r,
@@ -187,7 +216,7 @@ function SalesTeam() {
         roleLabel: ROLE_LABELS.sales_member,
       }));
     return reps;
-  }, [reps, isMember, user?.id]);
+  }, [reps, isMember, phone, role, selfView, user?.id]);
   const filtered: Array<
     RepStats & {
       phone?: string;
@@ -195,7 +224,7 @@ function SalesTeam() {
       memberId?: string;
       memberRole?: TeamMember["role"];
     }
-  > = isMember
+  > = selfView || isMember
     ? merged
     : merged.filter((r) => {
         if (q && !(r.name.toLowerCase().includes(q.toLowerCase()) || (r.phone ?? "").includes(q)))
@@ -217,15 +246,15 @@ function SalesTeam() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">
-            <span className="gradient-text">{isMember ? "My Performance" : "Sales Team"}</span>
+            <span className="gradient-text">{selfView ? "My Performance" : isMember ? "My Performance" : "Sales Team"}</span>
           </h1>
           <p className="text-sm text-muted-foreground">
-            {isMember
+            {selfView || isMember
               ? `Your personal scorecard, ${name ?? ""}.`
               : "Leaderboard, scores, and coaching recommendations."}
           </p>
         </div>
-        {!isMember && (
+        {!selfView && !isMember && (
           <div className="relative w-full sm:w-72">
             <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -238,7 +267,7 @@ function SalesTeam() {
         )}
       </div>
 
-      {!isMember && (
+      {!selfView && !isMember && (
         <div className="grid gap-2 sm:grid-cols-2 lg:max-w-xl">
           <Select value={roleFilter} onValueChange={setRoleFilter}>
             <SelectTrigger>
@@ -264,14 +293,14 @@ function SalesTeam() {
         </div>
       )}
 
-      {isMember && user && (
+      {!selfView && isMember && user && (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
           <MemberTaskPanel commitments={commitments} />
           <TeamChat memberId={user.id} memberName={name ?? "You"} embedded />
         </div>
       )}
 
-      {!isMember && (unread.length > 0 || dueTomorrow.length > 0) && (
+      {!selfView && !isMember && (unread.length > 0 || dueTomorrow.length > 0) && (
         <Card className="border-border shadow-none">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
@@ -303,7 +332,7 @@ function SalesTeam() {
         </Card>
       )}
 
-      {isBH && (
+      {!selfView && isBH && (
         <Card className="border-border shadow-none">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
@@ -311,13 +340,13 @@ function SalesTeam() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {loginUsers.length === 0 ? (
+            {loginUsersWithStats.length === 0 ? (
               <p className="py-4 text-center text-sm text-muted-foreground">
                 No login users found.
               </p>
             ) : (
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {loginUsers.map((u) => (
+                {loginUsersWithStats.map((u) => (
                   <div
                     key={u.id}
                     className="rounded-lg border border-border bg-background/60 p-3 text-sm"
@@ -341,6 +370,10 @@ function SalesTeam() {
                           {ROLE_LABELS[u.role]}
                         </Badge>
                       )}
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-center">
+                      <Mini label="Pipeline" value={fmtINR(u.stats.pipeline)} tone="info" />
+                      <Mini label="Revenue won" value={fmtINR(u.stats.won)} tone="success" />
                     </div>
                     <div className="mt-3 grid gap-1.5 text-xs text-muted-foreground">
                       <span className="inline-flex items-center gap-1">
@@ -366,7 +399,7 @@ function SalesTeam() {
         </Card>
       )}
 
-      <div className={cn("grid gap-4", isMember ? "max-w-2xl" : "sm:grid-cols-2 xl:grid-cols-3")}>
+      <div className={cn("grid gap-4", selfView || isMember ? "max-w-2xl" : "sm:grid-cols-2 xl:grid-cols-3")}>
         {filtered.length === 0 && (
           <p className="col-span-full py-12 text-center text-sm text-muted-foreground">
             {isMember

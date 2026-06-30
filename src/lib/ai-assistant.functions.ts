@@ -2,6 +2,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 
+function normalizeCurrencyText(value: string | null | undefined) {
+  return value?.replace(/\$/g, "₹") ?? value ?? null;
+}
+
+function normalizeCurrencyArray(values: string[] | undefined) {
+  return values?.map((value) => value.replace(/\$/g, "₹")) ?? [];
+}
+
 export const askAi = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => z.object({ question: z.string().min(2).max(2000) }).parse(input))
@@ -31,7 +39,7 @@ export const askAi = createServerFn({ method: "POST" })
     const { createGeminiProvider, GEMINI_TEXT_MODEL } = await import("@/lib/ai-gateway.server");
     const gateway = createGeminiProvider();
 
-    const system = `You are the Chimertech Sales Intelligence assistant. You answer questions about sales execution using ONLY the JSON dataset provided. Do not invent customers, salespeople, or numbers. If the dataset does not contain the answer, say so plainly.
+    const system = `You are the Chimertech Sales Intelligence assistant. You answer questions about sales execution using ONLY the JSON dataset provided. Do not invent customers, salespeople, or numbers. If the dataset does not contain the answer, say so plainly. All money is Indian Rupees. Use INR or ₹ only; never use $ or dollars.
 
 Return ONLY JSON in this exact shape (no markdown, no commentary):
 {
@@ -56,8 +64,14 @@ Return ONLY JSON in this exact shape (no markdown, no commentary):
         answer: string; evidence?: string[]; risk?: string | null;
         action_required?: string | null; responsible?: string | null; follow_up_date?: string | null;
       };
-      return parsed;
+      return {
+        ...parsed,
+        answer: normalizeCurrencyText(parsed.answer) ?? "",
+        evidence: normalizeCurrencyArray(parsed.evidence),
+        risk: normalizeCurrencyText(parsed.risk),
+        action_required: normalizeCurrencyText(parsed.action_required),
+      };
     } catch {
-      return { answer: cleaned, evidence: [], risk: null, action_required: null, responsible: null, follow_up_date: null };
+      return { answer: cleaned.replace(/\$/g, "₹"), evidence: [], risk: null, action_required: null, responsible: null, follow_up_date: null };
     }
   });
