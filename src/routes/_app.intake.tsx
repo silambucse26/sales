@@ -83,10 +83,11 @@ function IntakePage() {
         setRecording(false);
         const blob = new Blob(chunksRef.current, { type: mime });
         if (blob.size < 1024) { toast.error("Recording was too short."); return; }
-        const b64 = await blobToBase64(blob);
+        const wavBlob = await audioBlobToWav(blob);
+        const b64 = await blobToBase64(wavBlob);
         setBusy(true);
         try {
-          const r = await transcribe({ data: { audioBase64: b64, mime } });
+          const r = await transcribe({ data: { audioBase64: b64, mime: "audio/wav" } });
           if (r.text) setText((prev) => (prev ? prev + "\n" : "") + r.text);
           toast.success("Voice transcribed");
         } catch (e: unknown) {
@@ -347,6 +348,56 @@ function blobToBase64(blob: Blob): Promise<string> {
     };
     r.readAsDataURL(blob);
   });
+}
+
+async function audioBlobToWav(blob: Blob): Promise<Blob> {
+  const AudioContextClass =
+    window.AudioContext ||
+    (window as Window & typeof globalThis & { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext;
+  const ctx = new AudioContextClass();
+  try {
+    const buffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+    return new Blob([encodeWav(buffer)], { type: "audio/wav" });
+  } finally {
+    await ctx.close().catch(() => undefined);
+  }
+}
+
+function encodeWav(buffer: AudioBuffer): ArrayBuffer {
+  const channels = Math.min(2, buffer.numberOfChannels);
+  const sampleRate = buffer.sampleRate;
+  const samples = buffer.length;
+  const blockAlign = channels * 2;
+  const dataSize = samples * blockAlign;
+  const out = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(out);
+  let offset = 0;
+  const writeString = (s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i));
+  };
+  writeString("RIFF");
+  view.setUint32(offset, 36 + dataSize, true); offset += 4;
+  writeString("WAVE");
+  writeString("fmt ");
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, channels, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * blockAlign, true); offset += 4;
+  view.setUint16(offset, blockAlign, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+  writeString("data");
+  view.setUint32(offset, dataSize, true); offset += 4;
+  const channelData = Array.from({ length: channels }, (_, i) => buffer.getChannelData(i));
+  for (let i = 0; i < samples; i++) {
+    for (let ch = 0; ch < channels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channelData[ch][i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return out;
 }
 
 const EXAMPLE = `Visited Lakshmi Vet Pharma. Pregnancy Kit discussion. Customer interested in 200 kits. Expected order Friday. Need revised quotation. Competition is ABC Pharma. No PO yet.`;

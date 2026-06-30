@@ -67,7 +67,8 @@ import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/")({ component: DashboardPage });
 
-const DEFAULT_MONTHLY_TARGET_PER_REP = 5_000_000; // ₹50 Lakhs per sales member per month
+const DEFAULT_MONTHLY_TARGET_PER_REP = 5_000_000; // Rs 50 Lakhs per sales member per month
+const CRORE = 10_000_000;
 
 function useMonthlyTarget() {
   return useQuery({
@@ -94,17 +95,17 @@ function useMonthlyTarget() {
 function TargetEditor({ current, canEdit }: { current: number; canEdit: boolean }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(String(Math.round(current / 100000))); // in lakhs
+  const [val, setVal] = useState(formatCroreInput(current));
   const [saving, setSaving] = useState(false);
   if (!canEdit) return null;
   async function save() {
-    const lakhs = Number(val);
-    if (!Number.isFinite(lakhs) || lakhs <= 0) {
-      toast.error("Enter a valid amount in ₹ Lakhs");
+    const crore = Number(val);
+    if (!Number.isFinite(crore) || crore <= 0) {
+      toast.error("Enter a valid amount in crores");
       return;
     }
     setSaving(true);
-    const rupees = Math.round(lakhs * 100000);
+    const rupees = Math.round(crore * CRORE);
     const { error } = await supabase.from("app_settings").upsert({
       key: "monthly_target_per_rep",
       value: rupees,
@@ -115,7 +116,7 @@ function TargetEditor({ current, canEdit }: { current: number; canEdit: boolean 
       toast.error(error.message);
       return;
     }
-    toast.success(`Monthly target set to ₹${lakhs}L per rep`);
+    toast.success(`Monthly target set to ${formatCroreInput(rupees)} Cr per rep`);
     setEditing(false);
     qc.invalidateQueries({ queryKey: ["app_settings", "monthly_target_per_rep"] });
   }
@@ -125,7 +126,7 @@ function TargetEditor({ current, canEdit }: { current: number; canEdit: boolean 
         variant="outline"
         size="sm"
         onClick={() => {
-          setVal(String(Math.round(current / 100000)));
+          setVal(formatCroreInput(current));
           setEditing(true);
         }}
       >
@@ -140,7 +141,7 @@ function TargetEditor({ current, canEdit }: { current: number; canEdit: boolean 
         onChange={(e) => setVal(e.target.value)}
         className="h-7 w-20 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0"
       />
-      <span className="text-xs text-muted-foreground">L / rep / month</span>
+      <span className="text-xs text-muted-foreground">Cr / rep / month</span>
       <Button size="sm" onClick={save} disabled={saving}>
         <Save className="h-3.5 w-3.5" />
       </Button>
@@ -149,6 +150,10 @@ function TargetEditor({ current, canEdit }: { current: number; canEdit: boolean 
       </Button>
     </div>
   );
+}
+
+function formatCroreInput(value: number) {
+  return Number((value / CRORE).toFixed(2)).toString();
 }
 
 function todayISO() {
@@ -184,7 +189,7 @@ function DashboardPage() {
   const { data: customerIntakes = [] } = useIntakes();
   const { data: members = [] } = useTeamMembers();
   const { data: monthlyTargetPerRep = DEFAULT_MONTHLY_TARGET_PER_REP } = useMonthlyTarget();
-  const targetLakhs = Math.round(monthlyTargetPerRep / 100000);
+  const targetCrore = formatCroreInput(monthlyTargetPerRep);
   const memberNameById = useMemo(
     () => new Map(members.map((m) => [m.id, m.name] as const)),
     [members],
@@ -278,7 +283,7 @@ function DashboardPage() {
   const successRate = total === 0 ? 0 : Math.round((completed.length / total) * 100);
   const totalWon = completed.reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
   const totalPipeline = displayCommitments
-    .filter((c) => c.status !== "completed" && c.status !== "missed")
+    .filter((c) => c.status !== "completed" && effectiveStatus(c) !== "missed")
     .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
 
   // Monthly slices
@@ -286,7 +291,7 @@ function DashboardPage() {
     .filter((c) => c.status === "completed")
     .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
   const monthPipeline = monthCommits
-    .filter((c) => c.status !== "completed" && c.status !== "missed")
+    .filter((c) => c.status !== "completed" && effectiveStatus(c) !== "missed")
     .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
   const monthMissed = monthCommits
     .filter((c) => effectiveStatus(c) === "missed")
@@ -364,7 +369,7 @@ function DashboardPage() {
         .filter((c) => c.status === "completed")
         .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
       const pipe = inM
-        .filter((c) => c.status !== "completed" && c.status !== "missed")
+        .filter((c) => c.status !== "completed" && effectiveStatus(c) !== "missed")
         .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
       const miss = inM
         .filter((c) => effectiveStatus(c) === "missed")
@@ -406,7 +411,7 @@ function DashboardPage() {
       c.promise_date >= today &&
       c.promise_date <= wk &&
       c.status !== "completed" &&
-      c.status !== "missed",
+      effectiveStatus(c) !== "missed",
   );
   const closingMonth = displayCommitments.filter(
     (c) =>
@@ -414,7 +419,7 @@ function DashboardPage() {
       c.promise_date >= today &&
       c.promise_date <= me &&
       c.status !== "completed" &&
-      c.status !== "missed",
+      effectiveStatus(c) !== "missed",
   );
   const upcoming = displayCommitments
     .filter((c) => c.status !== "completed" && c.promise_date && c.promise_date >= today)
@@ -585,8 +590,8 @@ function DashboardPage() {
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {isPrivileged
-                    ? `${repCount} rep${repCount > 1 ? "s" : ""} × ₹${targetLakhs}L target`
-                    : `Personal target ₹${targetLakhs}L this month`}{" "}
+                    ? `${repCount} rep${repCount > 1 ? "s" : ""} x ${targetCrore} Cr target`
+                    : `Personal target ${targetCrore} Cr this month`}{" "}
                   · Gap {fmtINR(gap)}
                 </div>
               </div>
@@ -704,7 +709,7 @@ function DashboardPage() {
                         {pct}%
                       </div>
                       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                        of ₹{targetLakhs}L
+                        of {targetCrore} Cr
                       </div>
                     </div>
                   </div>

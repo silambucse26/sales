@@ -190,16 +190,22 @@ Rules:
 export const transcribeAudio = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) =>
-    z.object({ audioBase64: z.string().min(1), mime: z.string().default("audio/webm") }).parse(input)
+    z.object({ audioBase64: z.string().min(1), mime: z.string().default("audio/wav") }).parse(input)
   )
   .handler(async ({ data }) => {
     const { GEMINI_TEXT_MODEL, getGeminiApiKey } = await import("@/lib/ai-gateway.server");
     const apiKey = getGeminiApiKey();
 
     const ext = ({
-      "audio/webm": "webm", "audio/mp4": "mp4", "audio/mpeg": "mp3",
-      "audio/wav": "wav", "audio/ogg": "ogg",
+      "audio/mpeg": "mp3",
+      "audio/mp3": "mp3",
+      "audio/wav": "wav",
+      "audio/wave": "wav",
+      "audio/x-wav": "wav",
     } as Record<string, string>)[data.mime.split(";")[0]] ?? "webm";
+    if (ext !== "wav" && ext !== "mp3") {
+      throw new Error("Unsupported audio format. Please record again; voice notes are converted to WAV before transcription.");
+    }
 
     const res = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
       method: "POST",
