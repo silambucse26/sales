@@ -110,15 +110,22 @@ export function useCommitments() {
 }
 
 export function useIntakes() {
-  const { user, role } = useAuth();
+  const { user, role, name, phone } = useAuth();
   return useQuery({
-    queryKey: ["intakes", user?.id, role],
+    queryKey: ["intakes", user?.id, role, name, phone],
     queryFn: async () => {
-      const { data, error } = await supabase
+      let query = supabase
         .from("intakes")
         .select("*")
         .order("created_at", { ascending: false })
         .limit(200);
+      if (role === "sales_member") {
+        const code = salesCode(name, phone);
+        const clauses = [`user_id.eq.${user!.id}`, `extracted->>salesperson.eq.${code}`];
+        if (name) clauses.push(`extracted->>salesperson.eq.${name}`);
+        query = query.or(clauses.join(","));
+      }
+      const { data, error } = await query;
       if (error) throw error;
       return (data ?? []) as IntakeRow[];
     },

@@ -23,27 +23,37 @@ function Customers() {
   const { data: commitments = [] } = useCommitments();
   const { data: intakes = [] } = useIntakes();
   const { data: members = [] } = useTeamMembers();
-  const { user } = useAuth();
-  const customers = useMemo(() => aggregateCustomers(commitments, intakes), [commitments, intakes]);
+  const { user, role, name, phone } = useAuth();
+  const myCode = salesCode(name, phone);
+  const visibleCommitments = useMemo(() => {
+    if (role === "business_head") return commitments;
+    return commitments.filter((c) => isOwnCommitment(c, user?.id, name, myCode));
+  }, [commitments, myCode, name, role, user?.id]);
+  const visibleIntakes = useMemo(() => {
+    if (role === "business_head") return intakes;
+    return intakes.filter((i) => isOwnIntake(i, user?.id, name, myCode));
+  }, [intakes, myCode, name, role, user?.id]);
+  const customers = useMemo(() => aggregateCustomers(visibleCommitments, visibleIntakes), [visibleCommitments, visibleIntakes]);
   const [q, setQ] = useState("");
   const [repFilter, setRepFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
   const [open, setOpen] = useState<CustomerStats | null>(null);
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
-  const repOptions = useMemo(() => Array.from(new Set(commitments.map((c) => (c.salesperson ?? "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [commitments]);
+  const repOptions = useMemo(() => Array.from(new Set(visibleCommitments.map((c) => (c.salesperson ?? "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [visibleCommitments]);
   const filtered = customers.filter((c) => {
     if (q && !c.name.toLowerCase().includes(q.toLowerCase())) return false;
     if (repFilter !== "all" && c.rep !== repFilter) return false;
     if (dateFilter) {
-      const hasCommitmentOnDate = commitments.some((row) => (row.customer ?? "").trim() === c.name && row.promise_date === dateFilter);
-      if (!hasCommitmentOnDate) return false;
+      const hasUploadOnDate = visibleIntakes.some((row) => intakeCustomer(row) === c.name && row.created_at.slice(0, 10) === dateFilter);
+      const hasCommitmentOnDate = visibleCommitments.some((row) => (row.customer ?? "").trim() === c.name && (row.promise_date === dateFilter || row.created_at.slice(0, 10) === dateFilter));
+      if (!hasUploadOnDate && !hasCommitmentOnDate) return false;
     }
     return true;
   });
   const selectedCustomer = open ? (customers.find((c) => c.name === open.name) ?? open) : null;
   const recentAdds = useMemo(() => {
-    return intakes
-      .filter((i) => !user?.id || i.user_id === user.id)
+    return visibleIntakes
+      .filter((i) => !dateFilter || i.created_at.slice(0, 10) === dateFilter)
       .map((i) => {
         const ext = (i.extracted ?? {}) as {
           customer?: string | null;
@@ -62,7 +72,7 @@ function Customers() {
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 20);
-  }, [intakes, user?.id]);
+  }, [dateFilter, visibleIntakes]);
 
   return (
     <div className="space-y-6">
@@ -116,6 +126,7 @@ function Customers() {
         {filtered.length === 0 && <p className="col-span-full py-12 text-center text-sm text-muted-foreground">No customers yet.</p>}
         {filtered.map((c) => {
           const risk = c.missed > 0 ? "High" : c.open > 2 ? "Medium" : "Low";
+          const latestUpload = latestIntakeForCustomer(c.name, visibleIntakes);
           return (
             <button key={c.name} onClick={() => setOpen(c)} className="text-left">
               <Card className="card-soft border-0 shadow-none hover:shadow-md transition-shadow">
@@ -124,6 +135,7 @@ function Customers() {
                     <div className="min-w-0">
                       <CardTitle className="flex items-center gap-2 truncate text-base"><Building2 className="h-4 w-4 text-primary" /> {c.name}</CardTitle>
                       <div className="mt-0.5 text-xs text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">Uploaded {latestUpload ? formatDateTime(latestUpload.created_at) : "—"}</div>
                     </div>
                     <Badge variant="outline" className={cn("text-[10px]", risk === "High" ? "border-destructive/40 text-destructive" : risk === "Medium" ? "border-warning/40 text-warning-foreground" : "border-success/40 text-success-foreground")}>{risk} risk</Badge>
                   </div>
@@ -145,13 +157,13 @@ function Customers() {
             </button>
           );
         })}
-        </div> : <CustomerTable customers={filtered} onOpen={setOpen} />}
+        </div> : <CustomerTable customers={filtered} intakes={visibleIntakes} onOpen={setOpen} />}
       </div>
 
       <Dialog open={!!open} onOpenChange={(v) => !v && setOpen(null)}>
         <DialogContent className="max-w-2xl">
           <DialogHeader><DialogTitle>{open?.name}</DialogTitle></DialogHeader>
-          {selectedCustomer && <CustomerProfile cust={selectedCustomer} commitments={commitments} intakes={intakes} members={members} />}
+          {selectedCustomer && <CustomerProfile cust={selectedCustomer} commitments={visibleCommitments} intakes={visibleIntakes} members={members} />}
         </DialogContent>
       </Dialog>
     </div>
@@ -199,7 +211,7 @@ function RecentlyAdded({
   );
 }
 
-function CustomerTable({ customers, onOpen }: { customers: CustomerStats[]; onOpen: (customer: CustomerStats) => void }) {
+function CustomerTable({ customers, intakes, onOpen }: { customers: CustomerStats[]; intakes: IntakeRow[]; onOpen: (customer: CustomerStats) => void }) {
   if (customers.length === 0) {
     return <p className="py-12 text-center text-sm text-muted-foreground">No customers yet.</p>;
   }
@@ -209,31 +221,36 @@ function CustomerTable({ customers, onOpen }: { customers: CustomerStats[]; onOp
       <CardContent className="p-0">
         <div className="overflow-x-auto">
           <div className="min-w-[840px]">
-            <div className="grid grid-cols-[1.6fr_1fr_1fr_1fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="grid grid-cols-[1.4fr_1fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               <div>Customer</div>
               <div>Salesperson</div>
+              <div>Upload time</div>
               <div className="text-right">Pipeline</div>
               <div className="text-right">Won</div>
               <div className="text-right">Open</div>
               <div className="text-right">Missed</div>
               <div className="text-right">Popup</div>
             </div>
-            {customers.map((c) => (
-              <button
-                key={c.name}
-                type="button"
-                onClick={() => onOpen(c)}
-                className="grid w-full grid-cols-[1.6fr_1fr_1fr_1fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-border/70 px-4 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
-              >
-                <div className="truncate font-medium">{c.name}</div>
-                <div className="truncate text-muted-foreground">{c.rep ?? "Unassigned"}</div>
-                <div className="text-right font-semibold text-info">{fmtINR(c.pipeline)}</div>
-                <div className="text-right font-semibold text-success">{fmtINR(c.won)}</div>
-                <div className="text-right">{c.open}</div>
-                <div className="text-right">{c.missed}</div>
-                <div className="text-right text-primary">Open</div>
-              </button>
-            ))}
+            {customers.map((c) => {
+              const latestUpload = latestIntakeForCustomer(c.name, intakes);
+              return (
+                <button
+                  key={c.name}
+                  type="button"
+                  onClick={() => onOpen(c)}
+                  className="grid w-full grid-cols-[1.4fr_1fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border/70 px-4 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
+                >
+                  <div className="truncate font-medium">{c.name}</div>
+                  <div className="truncate text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                  <div className="truncate text-xs text-muted-foreground">{latestUpload ? formatDateTime(latestUpload.created_at) : "—"}</div>
+                  <div className="text-right font-semibold text-info">{fmtINR(c.pipeline)}</div>
+                  <div className="text-right font-semibold text-success">{fmtINR(c.won)}</div>
+                  <div className="text-right">{c.open}</div>
+                  <div className="text-right">{c.missed}</div>
+                  <div className="text-right text-primary">Open</div>
+                </button>
+              );
+            })}
           </div>
         </div>
       </CardContent>
@@ -375,6 +392,38 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
 
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function latestIntakeForCustomer(customerName: string, intakes: IntakeRow[]) {
+  return intakes
+    .filter((i) => {
+      return intakeCustomer(i) === customerName;
+    })
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+}
+
+function intakeCustomer(i: IntakeRow) {
+  const ext = (i.extracted ?? {}) as { customer?: string | null };
+  return ext.customer?.trim() ?? "";
+}
+
+function isOwnCommitment(c: Commitment, userId?: string, name?: string | null, code?: string) {
+  const salesperson = (c.salesperson ?? "").trim().toLowerCase();
+  return (
+    (!!userId && (c.user_id === userId || c.assigned_to === userId)) ||
+    (!!name && salesperson === name.trim().toLowerCase()) ||
+    (!!code && salesperson === code.trim().toLowerCase())
+  );
+}
+
+function isOwnIntake(i: IntakeRow, userId?: string, name?: string | null, code?: string) {
+  const ext = (i.extracted ?? {}) as { salesperson?: string | null };
+  const salesperson = (ext.salesperson ?? "").trim().toLowerCase();
+  return (
+    (!!userId && i.user_id === userId) ||
+    (!!name && salesperson === name.trim().toLowerCase()) ||
+    (!!code && salesperson === code.trim().toLowerCase())
+  );
 }
 
 function Mini({ label, value }: { label: string; value: string | number }) {

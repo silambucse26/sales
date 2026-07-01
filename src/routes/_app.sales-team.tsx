@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -27,8 +27,6 @@ import {
   CheckCircle2,
   Phone,
   Shield,
-  Mail,
-  KeyRound,
   CalendarClock,
   Bell,
   MessageSquare,
@@ -53,7 +51,7 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { ROLE_LABELS } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { changeUserRole, listLoginUsers } from "@/lib/admin.functions";
+import { changeUserRole } from "@/lib/admin.functions";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -108,7 +106,6 @@ function SalesTeam() {
   const { data: notifications = [] } = useNotifications();
   const qc = useQueryClient();
   const doChangeRole = useServerFn(changeUserRole);
-  const getLoginUsers = useServerFn(listLoginUsers);
   const isMember = role === "sales_member";
   const isBH = role === "business_head";
   const selfView = !isBH;
@@ -137,13 +134,8 @@ function SalesTeam() {
       ).trim() || "Unassigned",
     [memberNameById],
   );
-  const { data: loginUsers = [] } = useQuery({
-    queryKey: ["login-users", role],
-    queryFn: () => getLoginUsers(),
-    enabled: isBH,
-  });
-  const loginUsersWithStats = useMemo(() => {
-    return loginUsers
+  const databaseUsersWithStats = useMemo(() => {
+    return members
       .map((u) => {
         const ownRows = commitments.filter(
           (c) =>
@@ -153,7 +145,7 @@ function SalesTeam() {
         return { ...u, stats: statsForCommitments(u.name, ownRows) };
       })
       .sort((a, b) => b.stats.won + b.stats.pipeline - (a.stats.won + a.stats.pipeline));
-  }, [commitments, loginUsers]);
+  }, [commitments, members]);
 
   const monthByRep = useMemo(() => {
     const current = new Date();
@@ -336,17 +328,17 @@ function SalesTeam() {
         <Card className="border-border shadow-none">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
-              <Shield className="h-4 w-4 text-primary" /> Login users
+              <Shield className="h-4 w-4 text-primary" /> Database users
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {loginUsersWithStats.length === 0 ? (
+            {databaseUsersWithStats.length === 0 ? (
               <p className="py-4 text-center text-sm text-muted-foreground">
-                No login users found.
+                No database users found.
               </p>
             ) : (
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {loginUsersWithStats.map((u) => (
+                {databaseUsersWithStats.map((u) => (
                   <div
                     key={u.id}
                     className="rounded-lg border border-border bg-background/60 p-3 text-sm"
@@ -359,10 +351,6 @@ function SalesTeam() {
                             <Phone className="h-3 w-3" />
                             {u.phone || "No phone"}
                           </span>
-                          <span className="inline-flex items-center gap-1">
-                            <Mail className="h-3 w-3" />
-                            {u.email || "No email"}
-                          </span>
                         </div>
                       </div>
                       {u.role && (
@@ -374,22 +362,6 @@ function SalesTeam() {
                     <div className="mt-3 grid grid-cols-2 gap-2 text-center">
                       <Mini label="Pipeline" value={fmtINR(u.stats.pipeline)} tone="info" />
                       <Mini label="Revenue won" value={fmtINR(u.stats.won)} tone="success" />
-                    </div>
-                    <div className="mt-3 grid gap-1.5 text-xs text-muted-foreground">
-                      <span className="inline-flex items-center gap-1">
-                        <CalendarClock className="h-3 w-3" />
-                        Last login: {formatDateTime(u.lastSignInAt)}
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <CalendarClock className="h-3 w-3" />
-                        Created: {formatDateTime(u.createdAt)}
-                      </span>
-                      {u.adminPassword && (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 font-mono text-[11px] text-foreground">
-                          <KeyRound className="h-3 w-3 text-warning" />
-                          Admin password: {u.adminPassword}
-                        </span>
-                      )}
                     </div>
                   </div>
                 ))}

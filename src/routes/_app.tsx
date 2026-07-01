@@ -1,5 +1,6 @@
 import { createFileRoute, Link, Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { LayoutDashboard, FileText, CheckSquare, LogOut, Sparkles, Menu, Swords, Users, Building2, Activity, MessageSquareText, Sun, Moon, Bell, Clock, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { signOut } from "@/lib/auth";
@@ -12,6 +13,8 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { ensureAdminRole } from "@/lib/admin.functions";
 import { effectiveStatus, fmtINR, useCommitments, useNotifications, type Commitment } from "@/lib/sales-data";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app")({ component: AppShell });
 
@@ -31,6 +34,7 @@ function AppShell() {
   const { user, loading, role, name, refresh } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const qc = useQueryClient();
 
   useEffect(() => {
     if (!loading && !user) navigate({ to: "/auth", search: { redirect: location.pathname }, replace: true });
@@ -42,6 +46,52 @@ function AppShell() {
       ensureAdminRole().then((r) => { if (r.promoted) refresh(); }).catch(() => {});
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const refreshLiveData = () => {
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["notifications", user.id] });
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+    };
+
+    const channel = supabase
+      .channel(`live-work-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "commitments",
+          filter: role === "business_head" ? undefined : `assigned_to=eq.${user.id}`,
+        },
+        refreshLiveData,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          refreshLiveData();
+          if (payload.eventType === "INSERT") {
+            const row = payload.new as { title?: string | null; body?: string | null };
+            toast.info(row.title ?? "New notification", {
+              description: row.body ?? undefined,
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [qc, role, user]);
 
   if (loading || !user) {
     return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Loading…</div>;
