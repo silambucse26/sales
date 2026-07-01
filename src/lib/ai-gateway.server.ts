@@ -3,6 +3,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 export const GEMINI_TEXT_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+export const GEMINI_FAST_MODEL = process.env.GEMINI_FAST_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
 
 export function getGeminiApiKey() {
   const apiKey = process.env.GEMINI_API_KEY ?? process.env.OPENAI_API_KEY;

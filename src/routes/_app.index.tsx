@@ -204,6 +204,33 @@ function commitmentMonth(c: Commitment) {
   return monthKey(c.promise_date ?? c.created_at);
 }
 
+type DashboardPeriod = "day" | "month" | "year";
+
+function yearKey(d: Date | string) {
+  const date = typeof d === "string" ? new Date(d) : d;
+  return String(date.getFullYear());
+}
+
+function dateInPeriod(value: string | null | undefined, mode: DashboardPeriod, key: string) {
+  if (!value) return false;
+  const iso = value.slice(0, 10);
+  if (mode === "day") return iso === key;
+  if (mode === "month") return iso.startsWith(key);
+  return iso.startsWith(`${key}-`);
+}
+
+function periodLabel(mode: DashboardPeriod, key: string) {
+  if (mode === "day") {
+    return new Date(`${key}T00:00:00`).toLocaleDateString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  }
+  if (mode === "month") return monthLabel(key);
+  return key;
+}
+
 function DashboardPage() {
   const { user, role, name } = useAuth();
   const isBH = role === "business_head";
@@ -288,9 +315,19 @@ function DashboardPage() {
       set.add(monthKey(d));
     }
     for (const c of displayCommitments) set.add(commitmentMonth(c));
+    for (const i of customerIntakes) set.add(monthKey(i.created_at));
     return Array.from(set).sort().reverse();
-  }, [displayCommitments]);
+  }, [customerIntakes, displayCommitments]);
+  const yearOptions = useMemo(() => {
+    const set = new Set<string>([yearKey(new Date())]);
+    for (const c of displayCommitments) set.add(yearKey(c.created_at));
+    for (const i of customerIntakes) set.add(yearKey(i.created_at));
+    return Array.from(set).sort().reverse();
+  }, [customerIntakes, displayCommitments]);
   const [selectedMonth, setSelectedMonth] = useState<string>(thisMonthKey);
+  const [dashboardPeriod, setDashboardPeriod] = useState<DashboardPeriod>("month");
+  const [selectedDay, setSelectedDay] = useState<string>(today);
+  const [selectedYear, setSelectedYear] = useState<string>(yearKey(new Date()));
   const [dashboardCustomer, setDashboardCustomer] = useState<CustomerStats | null>(null);
 
   const monthCommits = displayCommitments.filter((c) => commitmentMonth(c) === selectedMonth);
@@ -298,6 +335,37 @@ function DashboardPage() {
     () => aggregateCustomers(displayCommitments, customerIntakes),
     [displayCommitments, customerIntakes],
   );
+  const dashboardPeriodKey =
+    dashboardPeriod === "day"
+      ? selectedDay
+      : dashboardPeriod === "month"
+        ? selectedMonth
+        : selectedYear;
+  const periodCommitments = useMemo(
+    () =>
+      displayCommitments.filter((c) =>
+        dateInPeriod(c.created_at, dashboardPeriod, dashboardPeriodKey),
+      ),
+    [dashboardPeriod, dashboardPeriodKey, displayCommitments],
+  );
+  const periodIntakes = useMemo(
+    () =>
+      customerIntakes.filter((i) =>
+        dateInPeriod(i.created_at, dashboardPeriod, dashboardPeriodKey),
+      ),
+    [customerIntakes, dashboardPeriod, dashboardPeriodKey],
+  );
+  const periodCustomers = useMemo(
+    () => aggregateCustomers(periodCommitments, periodIntakes),
+    [periodCommitments, periodIntakes],
+  );
+  const periodWon = periodCustomers.reduce((s, c) => s + c.won, 0);
+  const periodPipeline = periodCustomers.reduce((s, c) => s + c.pipeline, 0);
+  const periodMissed = periodCommitments
+    .filter((c) => effectiveStatus(c) === "missed")
+    .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
+  const periodForecast = periodWon + periodPipeline * 0.6;
+  const dashboardPeriodTitle = periodLabel(dashboardPeriod, dashboardPeriodKey);
 
   // Totals (all-time, role-scoped via RLS)
   const todays = displayCommitments.filter((c) => c.promise_date === today);
@@ -306,10 +374,8 @@ function DashboardPage() {
   const missed = displayCommitments.filter((c) => effectiveStatus(c) === "missed");
   const total = displayCommitments.length;
   const successRate = total === 0 ? 0 : Math.round((completed.length / total) * 100);
-  const totalWon = completed.reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
-  const totalPipeline = displayCommitments
-    .filter((c) => c.status !== "completed" && effectiveStatus(c) !== "missed")
-    .reduce((s, c) => s + Number(c.expected_revenue ?? 0), 0);
+  const totalWon = customers.reduce((s, c) => s + c.won, 0);
+  const totalPipeline = customers.reduce((s, c) => s + c.pipeline, 0);
 
   // Monthly slices
   const monthWon = monthCommits
@@ -551,6 +617,47 @@ function DashboardPage() {
               </SelectContent>
             </Select>
           </div>
+          {isPrivileged && (
+            <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
+              <Select value={dashboardPeriod} onValueChange={(v) => setDashboardPeriod(v as DashboardPeriod)}>
+                <SelectTrigger className="h-7 w-[92px] border-0 bg-transparent px-1 text-sm shadow-none focus:ring-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="day">Daily</SelectItem>
+                  <SelectItem value="month">Monthly</SelectItem>
+                  <SelectItem value="year">Yearly</SelectItem>
+                </SelectContent>
+              </Select>
+              {dashboardPeriod === "day" && (
+                <Input type="date" value={selectedDay} onChange={(e) => setSelectedDay(e.target.value)} className="h-7 w-[140px] border-0 bg-transparent px-1 text-sm shadow-none focus-visible:ring-0" />
+              )}
+              {dashboardPeriod === "month" && (
+                <Select value={selectedMonth} onValueChange={setSelectedMonth}>
+                  <SelectTrigger className="h-7 w-[140px] border-0 bg-transparent px-1 text-sm shadow-none focus:ring-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {monthOptions.map((m) => (
+                      <SelectItem key={m} value={m}>{monthLabel(m)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {dashboardPeriod === "year" && (
+                <Select value={selectedYear} onValueChange={setSelectedYear}>
+                  <SelectTrigger className="h-7 w-[92px] border-0 bg-transparent px-1 text-sm shadow-none focus:ring-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {yearOptions.map((y) => (
+                      <SelectItem key={y} value={y}>{y}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          )}
           <TargetEditor current={monthlyTargetPerRep} canEdit={isPrivileged} />
           {isPrivileged && (
             <>
@@ -639,29 +746,29 @@ function DashboardPage() {
           )}
         </Card>
 
-        {/* Monthly KPIs */}
+        {/* Customer-period KPIs */}
         <div className="grid grid-cols-2 gap-4 lg:col-start-1 lg:row-start-1">
           <Kpi
-            label={`${monthLabel(selectedMonth)} · Revenue won`}
-            value={fmtINR(monthWon)}
+            label={`${dashboardPeriodTitle} - Customer revenue won`}
+            value={fmtINR(periodWon)}
             icon={CheckCircle2}
             tone="success"
           />
           <Kpi
-            label={`${monthLabel(selectedMonth)} · Pipeline`}
-            value={fmtINR(monthPipeline)}
+            label={`${dashboardPeriodTitle} - Customer pipeline`}
+            value={fmtINR(periodPipeline)}
             icon={TrendingUp}
             tone="info"
           />
           <Kpi
-            label={`${monthLabel(selectedMonth)} · Missed value`}
-            value={fmtINR(monthMissed)}
+            label={`${dashboardPeriodTitle} - Missed value`}
+            value={fmtINR(periodMissed)}
             icon={AlertTriangle}
             tone="warning"
           />
           <Kpi
-            label="AI forecast (month)"
-            value={fmtINR(forecast)}
+            label="Forecast from customer value"
+            value={fmtINR(periodForecast)}
             icon={BarChart3}
             tone="primary"
           />
@@ -760,8 +867,9 @@ function DashboardPage() {
 
       {isPrivileged && (
         <CustomerDashboard
-          customers={customers}
-          intakes={customerIntakes}
+          customers={periodCustomers}
+          intakes={periodIntakes}
+          periodLabel={dashboardPeriodTitle}
           onOpenCustomer={setDashboardCustomer}
         />
       )}
@@ -774,8 +882,8 @@ function DashboardPage() {
           {dashboardCustomer && (
             <DashboardCustomerPopup
               customer={dashboardCustomer}
-              commitments={displayCommitments}
-              intakes={customerIntakes}
+              commitments={periodCommitments}
+              intakes={periodIntakes}
             />
           )}
         </DialogContent>
@@ -1453,10 +1561,12 @@ function HeadRevenueCharts({
 function CustomerDashboard({
   customers,
   intakes,
+  periodLabel,
   onOpenCustomer,
 }: {
   customers: ReturnType<typeof aggregateCustomers>;
   intakes: IntakeRow[];
+  periodLabel: string;
   onOpenCustomer: (customer: CustomerStats) => void;
 }) {
   const topCustomers = customers.slice(0, 8);
@@ -1470,12 +1580,12 @@ function CustomerDashboard({
         <CardTitle className="flex items-center gap-2 text-base">
           <Building2 className="h-4 w-4 text-primary" /> Customer dashboard detail
         </CardTitle>
-        <Badge variant="secondary">{customers.length} customers</Badge>
+        <Badge variant="secondary">{periodLabel} - {customers.length} customers</Badge>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-3 gap-2 text-center">
           <RepStat label="Customer pipeline" value={fmtINR(totalPipeline)} tone="info" />
-          <RepStat label="Revenue won" value={fmtINR(totalWon)} tone="success" />
+          <RepStat label="Customer revenue won" value={fmtINR(totalWon)} tone="success" />
           <RepStat
             label="At risk"
             value={String(atRisk)}

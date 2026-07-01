@@ -9,11 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle, LayoutGrid, Table2 } from "lucide-react";
+import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle, LayoutGrid, Table2, Trash2, Save } from "lucide-react";
 import { useCommitments, useIntakes, useTeamMembers, aggregateCustomers, fmtINR, effectiveStatus, type CustomerStats, type Commitment, type IntakeRow, type TeamMember } from "@/lib/sales-data";
 import { useAuth } from "@/lib/auth-context";
 import { salesCode } from "@/lib/auth";
 import { createCommitment } from "@/lib/commitments.functions";
+import { deleteCustomer, deleteIntake, setCustomerFinancials } from "@/lib/customer.functions";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -161,9 +162,9 @@ function Customers() {
       </div>
 
       <Dialog open={!!open} onOpenChange={(v) => !v && setOpen(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-h-[calc(100vh-1rem)] w-[calc(100vw-1rem)] max-w-3xl overflow-y-auto p-4 sm:p-6">
           <DialogHeader><DialogTitle>{open?.name}</DialogTitle></DialogHeader>
-          {selectedCustomer && <CustomerProfile cust={selectedCustomer} commitments={visibleCommitments} intakes={visibleIntakes} members={members} />}
+          {selectedCustomer && <CustomerProfile cust={selectedCustomer} commitments={visibleCommitments} intakes={visibleIntakes} members={members} onDeleted={() => setOpen(null)} />}
         </DialogContent>
       </Dialog>
     </div>
@@ -258,7 +259,7 @@ function CustomerTable({ customers, intakes, onOpen }: { customers: CustomerStat
   );
 }
 
-function CustomerProfile({ cust, commitments, intakes, members }: { cust: CustomerStats; commitments: Commitment[]; intakes: IntakeRow[]; members: TeamMember[] }) {
+function CustomerProfile({ cust, commitments, intakes, members, onDeleted }: { cust: CustomerStats; commitments: Commitment[]; intakes: IntakeRow[]; members: TeamMember[]; onDeleted?: () => void }) {
   const own = (commitments ?? []).filter((c) => (c.customer ?? "").trim() === cust.name);
   const ownIntakes = (intakes ?? []).filter((i) => {
     const ext = (i.extracted ?? {}) as { customer?: string };
@@ -270,19 +271,31 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
   const { user, role, name, phone } = useAuth();
   const myCode = salesCode(name, phone);
   const canAssign = role === "business_head" || role === "sales_head";
+  const isBusinessHead = role === "business_head";
   const assignableMembers = useMemo(() => members.filter((m) => m.role === "sales_member" || m.role === "sales_head"), [members]);
   const defaultAssignee = assignableMembers.find((m) => m.name === cust.rep)?.id ?? user?.id ?? "";
   const qc = useQueryClient();
   const create = useServerFn(createCommitment);
+  const removeCustomer = useServerFn(deleteCustomer);
+  const removeIntake = useServerFn(deleteIntake);
+  const setFinancials = useServerFn(setCustomerFinancials);
   const [kind, setKind] = useState<"pipeline" | "won">("pipeline");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [assignedTo, setAssignedTo] = useState(defaultAssignee);
   const [saving, setSaving] = useState(false);
+  const [targetPipeline, setTargetPipeline] = useState(String(Math.max(0, Math.round(cust.pipeline))));
+  const [targetWon, setTargetWon] = useState(String(Math.max(0, Math.round(cust.won))));
+  const [editingTotals, setEditingTotals] = useState(false);
 
   useEffect(() => {
     setAssignedTo(defaultAssignee);
   }, [defaultAssignee]);
+
+  useEffect(() => {
+    setTargetPipeline(String(Math.max(0, Math.round(cust.pipeline))));
+    setTargetWon(String(Math.max(0, Math.round(cust.won))));
+  }, [cust.pipeline, cust.won]);
 
   async function submitUpdate() {
     const amt = Number(amount);
@@ -307,6 +320,51 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
     } finally { setSaving(false); }
   }
 
+  async function saveTotals() {
+    setSaving(true);
+    try {
+      await setFinancials({ data: {
+        customer: cust.name,
+        pipeline: Number(targetPipeline) || 0,
+        won: Number(targetWon) || 0,
+        assigned_to: assignedTo || undefined,
+        salesperson: canAssign ? (assignableMembers.find((m) => m.id === assignedTo)?.name ?? cust.rep ?? undefined) : myCode,
+      } });
+      toast.success("Customer values updated");
+      setEditingTotals(false);
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Update failed");
+    } finally { setSaving(false); }
+  }
+
+  async function deleteWholeCustomer() {
+    if (!confirm(`Delete ${cust.name} with all commitments and intakes?`)) return;
+    setSaving(true);
+    try {
+      await removeCustomer({ data: { customer: cust.name } });
+      toast.success("Customer deleted");
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      onDeleted?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    } finally { setSaving(false); }
+  }
+
+  async function deleteOneIntake(id: string) {
+    if (!confirm("Delete this intake and linked commitments?")) return;
+    setSaving(true);
+    try {
+      await removeIntake({ data: { id } });
+      toast.success("Intake deleted");
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    } finally { setSaving(false); }
+  }
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -314,6 +372,36 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
         <Stat label="Won" value={fmtINR(cust.won)} />
         <Stat label="Customer visit no." value={latestExt.intake_code ?? (ownIntakes.length ? `#${ownIntakes.length}` : "—")} />
         <Stat label="Visits" value={ownIntakes.length || "—"} />
+      </div>
+      <div className="rounded-xl border border-border bg-background/60 p-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-semibold">Customer values</div>
+          <div className="flex flex-wrap gap-2">
+            {isBusinessHead && (
+              <Button type="button" size="sm" variant="destructive" onClick={deleteWholeCustomer} disabled={saving}>
+                <Trash2 className="h-3.5 w-3.5" /> Delete customer
+              </Button>
+            )}
+            <Button type="button" size="sm" variant="outline" onClick={() => setEditingTotals((v) => !v)} disabled={saving}>
+              Edit values
+            </Button>
+          </div>
+        </div>
+        {editingTotals && (
+          <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+            <div className="relative">
+              <IndianRupee className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input value={targetPipeline} onChange={(e) => setTargetPipeline(e.target.value.replace(/[^\d]/g, ""))} placeholder="Pipeline value" className="pl-7" />
+            </div>
+            <div className="relative">
+              <IndianRupee className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input value={targetWon} onChange={(e) => setTargetWon(e.target.value.replace(/[^\d]/g, ""))} placeholder="Revenue won" className="pl-7" />
+            </div>
+            <Button type="button" onClick={saveTotals} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save values
+            </Button>
+          </div>
+        )}
       </div>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 text-center text-xs">
         <Mini label="Open" value={cust.open} />
@@ -323,14 +411,14 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
       </div>
 
       <div className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/5 to-info/5 p-3">
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-sm font-semibold"><Plus className="h-4 w-4 text-primary" /> Update this customer</div>
           <div className="inline-flex rounded-full border border-border bg-background p-0.5 text-xs">
             <button onClick={() => setKind("pipeline")} className={cn("rounded-full px-3 py-1 font-medium transition-colors", kind === "pipeline" ? "bg-info text-info-foreground" : "text-muted-foreground")}>Pipeline</button>
             <button onClick={() => setKind("won")} className={cn("rounded-full px-3 py-1 font-medium transition-colors", kind === "won" ? "bg-success text-success-foreground" : "text-muted-foreground")}>Revenue won</button>
           </div>
         </div>
-        <div className={cn("grid gap-2", canAssign ? "sm:grid-cols-[140px_180px_1fr_auto]" : "sm:grid-cols-[140px_1fr_auto]")}>
+        <div className={cn("grid gap-2", canAssign ? "sm:grid-cols-2 lg:grid-cols-[140px_180px_1fr_auto]" : "sm:grid-cols-[140px_1fr_auto]")}>
           <div className="relative">
             <IndianRupee className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d]/g, ""))} placeholder="Amount" inputMode="numeric" className="pl-7" />
@@ -378,9 +466,14 @@ function CustomerProfile({ cust, commitments, intakes, members }: { cust: Custom
               <div key={`i-${idx}`} className="flex items-start gap-3 rounded-lg border border-border bg-background/50 p-2.5 text-sm">
                 <span className="mt-1 h-2 w-2 rounded-full bg-primary" />
                 <div className="min-w-0 flex-1"><div className="truncate font-medium capitalize">{row.i.source} note</div><div className="line-clamp-2 text-xs text-muted-foreground">{row.i.raw_text}</div></div>
-                <div className="text-right text-xs text-muted-foreground">
+                <div className="flex max-w-36 shrink-0 flex-col items-end gap-1 text-right text-xs text-muted-foreground">
                   <div>{((row.i.extracted ?? {}) as { intake_code?: string }).intake_code ?? "—"}</div>
                   <div>{formatDateTime(row.i.created_at)}</div>
+                  {(isBusinessHead || row.i.user_id === user?.id) && (
+                    <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => deleteOneIntake(row.i.id)} disabled={saving}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}

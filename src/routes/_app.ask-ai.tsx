@@ -1,13 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Sparkles, Loader2, ArrowRight, AlertTriangle, Target, User, Calendar } from "lucide-react";
+import { Sparkles, Loader2, ArrowRight, AlertTriangle, Target, User, Calendar, Mic, Square } from "lucide-react";
 import { toast } from "sonner";
 import { askAi } from "@/lib/ai-assistant.functions";
+import { transcribeAudio } from "@/lib/intake.functions";
 
 export const Route = createFileRoute("/_app/ask-ai")({ component: AskAi });
 
@@ -32,9 +33,44 @@ const SUGGESTIONS = [
 
 function AskAi() {
   const ask = useServerFn(askAi);
+  const transcribe = useServerFn(transcribeAudio);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [history, setHistory] = useState<Array<{ q: string; a: Answer }>>([]);
+  const mediaRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  async function toggleRecord() {
+    if (recording) { mediaRef.current?.stop(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "audio/mp4";
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRecording(false);
+        const blob = new Blob(chunksRef.current, { type: mime });
+        if (blob.size < 1024) { toast.error("Recording too short."); return; }
+        const wavBlob = await audioBlobToWav(blob);
+        const b64 = await blobToBase64(wavBlob);
+        setBusy(true);
+        try {
+          const r = await transcribe({ data: { audioBase64: b64, mime: "audio/wav" } });
+          if (r.text) { setQ(r.text); toast.success("Voice transcribed — review and ask."); }
+        } catch (e: unknown) {
+          toast.error(e instanceof Error ? e.message : "Transcription failed");
+        } finally { setBusy(false); }
+      };
+      mediaRef.current = rec;
+      rec.start();
+      setRecording(true);
+    } catch {
+      toast.error("Microphone permission denied.");
+    }
+  }
 
   async function submit(question: string) {
     if (!question.trim()) return;
@@ -64,7 +100,10 @@ function AskAi() {
               <button key={s} onClick={() => submit(s)} disabled={busy} className="rounded-full border border-border bg-background/60 px-3 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors">{s}</button>
             ))}
           </div>
-          <div className="flex justify-end">
+          <div className="flex items-center justify-between">
+            <Button onClick={toggleRecord} variant={recording ? "destructive" : "outline"} disabled={busy} size="sm">
+              {recording ? <><Square className="mr-1.5 h-4 w-4" /> Stop</> : <><Mic className="mr-1.5 h-4 w-4" /> Speak your question</>}
+            </Button>
             <Button onClick={() => submit(q)} disabled={busy || !q.trim()}>
               {busy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-1.5 h-4 w-4" />} Ask
             </Button>
@@ -90,14 +129,14 @@ function AskAi() {
             <CardContent className="space-y-3">
               <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
                 <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary"><Sparkles className="h-3.5 w-3.5" /> Answer</div>
-                <p className="text-foreground/90 leading-relaxed">{row.a.answer}</p>
+                <p className="text-foreground/90 leading-relaxed">{readableText(row.a.answer)}</p>
               </div>
               {row.a.evidence && row.a.evidence.length > 0 && (
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Evidence</div>
                   <ul className="space-y-1 text-sm">
                     {row.a.evidence.map((e, idx) => (
-                      <li key={idx} className="flex items-start gap-2"><span className="mt-1.5 h-1 w-1 rounded-full bg-muted-foreground" />{e}</li>
+                      <li key={idx} className="flex items-start gap-2"><span className="mt-1.5 h-1 w-1 rounded-full bg-muted-foreground" />{readableText(e)}</li>
                     ))}
                   </ul>
                 </div>
@@ -114,6 +153,72 @@ function AskAi() {
       </div>
     </div>
   );
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error);
+    r.onload = () => {
+      const s = String(r.result ?? "");
+      const i = s.indexOf(",");
+      resolve(i >= 0 ? s.slice(i + 1) : s);
+    };
+    r.readAsDataURL(blob);
+  });
+}
+
+async function audioBlobToWav(blob: Blob): Promise<Blob> {
+  const AudioContextClass =
+    window.AudioContext ||
+    (window as Window & typeof globalThis & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AudioContextClass();
+  try {
+    const buffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const channels = Math.min(2, buffer.numberOfChannels);
+    const sampleRate = buffer.sampleRate;
+    const samples = buffer.length;
+    const blockAlign = channels * 2;
+    const dataSize = samples * blockAlign;
+    const out = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(out);
+    let offset = 0;
+    const writeString = (s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i)); };
+    writeString("RIFF"); view.setUint32(offset, 36 + dataSize, true); offset += 4;
+    writeString("WAVE"); writeString("fmt ");
+    view.setUint32(offset, 16, true); offset += 4;
+    view.setUint16(offset, 1, true); offset += 2;
+    view.setUint16(offset, channels, true); offset += 2;
+    view.setUint32(offset, sampleRate, true); offset += 4;
+    view.setUint32(offset, sampleRate * blockAlign, true); offset += 4;
+    view.setUint16(offset, blockAlign, true); offset += 2;
+    view.setUint16(offset, 16, true); offset += 2;
+    writeString("data"); view.setUint32(offset, dataSize, true); offset += 4;
+    const channelData = Array.from({ length: channels }, (_, i) => buffer.getChannelData(i));
+    for (let i = 0; i < samples; i++) {
+      for (let ch = 0; ch < channels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channelData[ch][i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+    return new Blob([out], { type: "audio/wav" });
+  } finally {
+    await ctx.close().catch(() => undefined);
+  }
+}
+
+function readableText(value: string) {
+  return value
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .replace(/^\s*\{\s*"answer"\s*:\s*/i, "")
+    .replace(/,\s*"evidence"\s*:\s*\[[\s\S]*$/i, "")
+    .replace(/^\s*"|"\s*$/g, "")
+    .replace(/\\n/g, " ")
+    .replace(/\\"/g, '"')
+    .trim();
 }
 
 function Pill({ icon: Icon, label, value, tone }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; tone?: "destructive"|"primary"|"info" }) {

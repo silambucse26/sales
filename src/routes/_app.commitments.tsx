@@ -11,10 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Plus, CheckCircle2, Clock, AlertTriangle, Search, XCircle, Sparkles, CalendarDays, User } from "lucide-react";
+import { Plus, CheckCircle2, Clock, AlertTriangle, Search, XCircle, Sparkles, CalendarDays, User, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { createCommitment, updateCommitmentStatus } from "@/lib/commitments.functions";
+import { createCommitment, updateCommitmentStatus, deleteCommitment } from "@/lib/commitments.functions";
 import { useCommitments, effectiveStatus, fmtINR, type Commitment } from "@/lib/sales-data";
 import { useTeamMembers } from "@/lib/sales-data";
 import { useAuth } from "@/lib/auth-context";
@@ -25,6 +25,7 @@ function CommitmentsPage() {
   const qc = useQueryClient();
   const update = useServerFn(updateCommitmentStatus);
   const create = useServerFn(createCommitment);
+  const remove = useServerFn(deleteCommitment);
   const [filter, setFilter] = useState<"all" | "open" | "today" | "missed" | "completed" | "overdue">("all");
   const [search, setSearch] = useState("");
   const [salespersonFilter, setSalespersonFilter] = useState("all");
@@ -32,6 +33,8 @@ function CommitmentsPage() {
   const [missedDialog, setMissedDialog] = useState<{ id: string; title: string } | null>(null);
   const [missedReason, setMissedReason] = useState("");
   const [detail, setDetail] = useState<Commitment | null>(null);
+  const { role } = useAuth();
+  const isBH = role === "business_head";
 
   const { data: rows = [], isLoading } = useCommitments();
   const today = new Date().toISOString().slice(0, 10);
@@ -68,6 +71,19 @@ function CommitmentsPage() {
       qc.invalidateQueries({ queryKey: ["commitments"] });
       setMissedDialog(null);
     } catch (e: unknown) { toast.error(e instanceof Error ? e.message : "Failed"); }
+  }
+
+  async function deleteOne(c: Commitment) {
+    if (!confirm(`Delete commitment "${c.title}"?`)) return;
+    try {
+      await remove({ data: { id: c.id } });
+      toast.success("Commitment deleted");
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      setDetail(null);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    }
   }
 
   return (
@@ -181,6 +197,16 @@ function CommitmentsPage() {
                     >
                       <XCircle className="mr-1 h-3.5 w-3.5" /> Missed
                     </Button>
+                    {isBH && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/30"
+                        onClick={() => deleteOne(r)}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
+                      </Button>
+                    )}
                   </div>
                 </div>
               );
@@ -203,14 +229,14 @@ function CommitmentsPage() {
 
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
         <DialogContent className="sm:max-w-xl">
-          {detail && <CommitmentDetail c={detail} onKept={async () => { await markKept(detail); setDetail(null); }} onMissed={() => { setDetail(null); openMissed(detail); }} />}
+          {detail && <CommitmentDetail c={detail} canDelete={isBH} onDelete={() => deleteOne(detail)} onKept={async () => { await markKept(detail); setDetail(null); }} onMissed={() => { setDetail(null); openMissed(detail); }} />}
         </DialogContent>
       </Dialog>
     </div>
   );
 }
 
-function CommitmentDetail({ c, onKept, onMissed }: { c: Commitment; onKept: () => void; onMissed: () => void }) {
+function CommitmentDetail({ c, canDelete, onKept, onMissed, onDelete }: { c: Commitment; canDelete?: boolean; onKept: () => void; onMissed: () => void; onDelete?: () => void }) {
   const eff = effectiveStatus(c);
   const overdue = c.status === "open" && c.promise_date && c.promise_date < new Date().toISOString().slice(0, 10);
   return (
@@ -256,6 +282,7 @@ function CommitmentDetail({ c, onKept, onMissed }: { c: Commitment; onKept: () =
         </div>
       )}
       <DialogFooter>
+        {canDelete && <Button variant="destructive" onClick={onDelete}><Trash2 className="mr-1 h-4 w-4" /> Delete</Button>}
         <Button variant="outline" onClick={onMissed} disabled={eff === "missed"}><XCircle className="mr-1 h-4 w-4" /> Mark missed</Button>
         <Button onClick={onKept} disabled={eff === "completed"}><CheckCircle2 className="mr-1 h-4 w-4" /> Mark kept</Button>
       </DialogFooter>

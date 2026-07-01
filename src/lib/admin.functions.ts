@@ -21,17 +21,28 @@ export const ensureAdminRole = createServerFn({ method: "POST" })
     const adminPhone = (process.env.ADMIN_PHONE ?? "").replace(/\D/g, "");
     if (!adminPhone) return { promoted: false };
 
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: profile } = await context.supabase
       .from("profiles")
-      .select("phone")
+      .select("name,phone")
       .eq("id", context.userId)
       .maybeSingle();
 
-    if (!profile) return { promoted: false };
-    const userPhone = (profile.phone ?? "").replace(/\D/g, "");
+    let userPhone = (profile?.phone ?? "").replace(/\D/g, "");
+    let userName = profile?.name ?? "Admin";
+    if (!userPhone) {
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(context.userId);
+      const metadata = authUser.user?.user_metadata as { name?: string; phone?: string } | null;
+      userPhone =
+        (metadata?.phone ?? authUser.user?.email?.match(/^p?(\d+)@/)?.[1] ?? "").replace(/\D/g, "");
+      userName = metadata?.name ?? userName;
+    }
+
     if (userPhone !== adminPhone) return { promoted: false };
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    await supabaseAdmin
+      .from("profiles")
+      .upsert({ id: context.userId, name: userName, phone: userPhone });
     await supabaseAdmin.from("user_roles").delete().eq("user_id", context.userId);
     await supabaseAdmin.from("user_roles").insert({ user_id: context.userId, role: "business_head" });
 
@@ -54,6 +65,134 @@ export const changeUserRole = createServerFn({ method: "POST" })
     await supabaseAdmin.from("user_roles").delete().eq("user_id", data.userId);
     await supabaseAdmin.from("user_roles").insert({ user_id: data.userId, role: data.role });
     return { ok: true };
+  });
+
+/** Business Head can remove a sales user and all app data owned by that user. */
+export const deleteSalesMember = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z.object({
+      userId: z.string().uuid(),
+    }).parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    await assertBusinessHead(context.supabase, context.userId);
+    if (data.userId === context.userId) throw new Error("You cannot delete your own admin account.");
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("name,phone")
+      .eq("id", data.userId)
+      .maybeSingle();
+    const memberName = profile?.name?.trim() ?? "";
+
+    const commitmentQuery = supabaseAdmin
+      .from("commitments")
+      .select("id")
+      .or(
+        [
+          `user_id.eq.${data.userId}`,
+          `assigned_to.eq.${data.userId}`,
+          ...(memberName ? [`salesperson.eq.${memberName}`] : []),
+        ].join(","),
+      );
+    const { data: commitmentRows, error: commitmentReadError } = await commitmentQuery;
+    if (commitmentReadError) throw new Error(commitmentReadError.message);
+    const commitmentIds = (commitmentRows ?? []).map((row) => row.id);
+
+    await supabaseAdmin.from("notifications").delete().eq("user_id", data.userId);
+    if (commitmentIds.length) {
+      await supabaseAdmin.from("notifications").delete().in("commitment_id", commitmentIds);
+      const { error } = await supabaseAdmin.from("commitments").delete().in("id", commitmentIds);
+      if (error) throw new Error(error.message);
+    }
+
+    const { data: intakeRows, error: intakeReadError } = await supabaseAdmin
+      .from("intakes")
+      .select("id,user_id,extracted");
+    if (intakeReadError) throw new Error(intakeReadError.message);
+    const intakeIds = (intakeRows ?? [])
+      .filter((row) => {
+        const ext = (row.extracted ?? {}) as { salesperson?: string | null };
+        return row.user_id === data.userId || (!!memberName && ext.salesperson?.trim() === memberName);
+      })
+      .map((row) => row.id);
+    if (intakeIds.length) {
+      const { error } = await supabaseAdmin.from("intakes").delete().in("id", intakeIds);
+      if (error) throw new Error(error.message);
+    }
+
+    await supabaseAdmin
+      .from("sales_team_messages")
+      .delete()
+      .or(`member_id.eq.${data.userId},sender_id.eq.${data.userId}`);
+    await supabaseAdmin.from("user_roles").delete().eq("user_id", data.userId);
+    await supabaseAdmin.from("profiles").delete().eq("id", data.userId);
+    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(data.userId);
+    if (authError) throw new Error(authError.message);
+
+    return {
+      ok: true,
+      deletedCommitments: commitmentIds.length,
+      deletedIntakes: intakeIds.length,
+    };
+  });
+
+/** Business Head can remove filled/imported data for a salesperson name that has no login profile. */
+export const deleteDataOnlySalesperson = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z.object({
+      name: z.string().min(1),
+    }).parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    await assertBusinessHead(context.supabase, context.userId);
+
+    const name = data.name.trim();
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: profileRows, error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .select("id")
+      .ilike("name", name);
+    if (profileError) throw new Error(profileError.message);
+    if ((profileRows ?? []).length > 0) {
+      throw new Error("This salesperson has a login profile. Use Delete member data instead.");
+    }
+
+    const { data: commitmentRows, error: commitmentReadError } = await supabaseAdmin
+      .from("commitments")
+      .select("id")
+      .ilike("salesperson", name);
+    if (commitmentReadError) throw new Error(commitmentReadError.message);
+    const commitmentIds = (commitmentRows ?? []).map((row) => row.id);
+    if (commitmentIds.length) {
+      await supabaseAdmin.from("notifications").delete().in("commitment_id", commitmentIds);
+      const { error } = await supabaseAdmin.from("commitments").delete().in("id", commitmentIds);
+      if (error) throw new Error(error.message);
+    }
+
+    const { data: intakeRows, error: intakeReadError } = await supabaseAdmin
+      .from("intakes")
+      .select("id,extracted");
+    if (intakeReadError) throw new Error(intakeReadError.message);
+    const intakeIds = (intakeRows ?? [])
+      .filter((row) => {
+        const ext = (row.extracted ?? {}) as { salesperson?: string | null };
+        return ext.salesperson?.trim().toLowerCase() === name.toLowerCase();
+      })
+      .map((row) => row.id);
+    if (intakeIds.length) {
+      const { error } = await supabaseAdmin.from("intakes").delete().in("id", intakeIds);
+      if (error) throw new Error(error.message);
+    }
+
+    return {
+      ok: true,
+      deletedCommitments: commitmentIds.length,
+      deletedIntakes: intakeIds.length,
+    };
   });
 
 /** Business Head-only login directory. Passwords cannot be read back from Supabase;

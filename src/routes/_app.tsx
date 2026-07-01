@@ -36,16 +36,22 @@ function AppShell() {
   const location = useLocation();
   const qc = useQueryClient();
 
+  async function confirmSignOut() {
+    if (!confirm("Are you sure you want to sign out?")) return;
+    await signOut();
+    navigate({ to: "/auth", replace: true });
+  }
+
   useEffect(() => {
     if (!loading && !user) navigate({ to: "/auth", search: { redirect: location.pathname }, replace: true });
   }, [user, loading, navigate, location.pathname]);
 
   // Auto-promote to business_head if this user's phone matches ADMIN_PHONE env var
   useEffect(() => {
-    if (user && role === "sales_member") {
+    if (user && role !== "business_head") {
       ensureAdminRole().then((r) => { if (r.promoted) refresh(); }).catch(() => {});
     }
-  }, [user?.id]);
+  }, [role, user?.id]);
 
   useEffect(() => {
     if (!user) return;
@@ -119,7 +125,7 @@ function AppShell() {
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-linear-to-br from-primary to-info text-sm font-semibold text-primary-foreground shadow-sm">
               {(name ?? "U").slice(0, 1).toUpperCase()}
             </div>
-            <Button variant="ghost" size="icon" onClick={async () => { await signOut(); navigate({ to: "/auth", replace: true }); }}>
+            <Button variant="ghost" size="icon" onClick={confirmSignOut}>
               <LogOut className="h-4 w-4" />
             </Button>
           </div>

@@ -189,7 +189,7 @@ export function useChatMessages(memberId?: string | null) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("sales_team_messages")
-        .select("*,sender:profiles(id,name,phone)")
+        .select("*,sender:profiles!sales_team_messages_sender_id_fkey(id,name,phone)")
         .eq("member_id", memberId!)
         .order("created_at", { ascending: true })
         .limit(100);

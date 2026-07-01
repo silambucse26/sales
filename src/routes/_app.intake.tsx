@@ -2,15 +2,15 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { useQueryClient } from "@tanstack/react-query";
-import { Mic, Square, Upload, Sparkles, Loader2, FileSpreadsheet, FileText } from "lucide-react";
+import { Mic, Square, Upload, Sparkles, Loader2, FileSpreadsheet } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { extractAndSaveIntake, transcribeAudio } from "@/lib/intake.functions";
-import { supabase } from "@/integrations/supabase/client";
+import { analyzeIntakeBulk, saveIntakeBulk, transcribeAudio } from "@/lib/intake.functions";
+import type { BulkRecord } from "@/lib/intake.functions";
+import { BulkIntakeTable } from "@/components/BulkIntakeTable";
 import { useIntakes, useCommitments, fmtINR } from "@/lib/sales-data";
 import { coerceMoneyToINR } from "@/lib/money";
 import { useAuth } from "@/lib/auth-context";
@@ -20,23 +20,19 @@ import { ArrowRight, MessageSquare, IdCard } from "lucide-react";
 
 export const Route = createFileRoute("/_app/intake")({ component: IntakePage });
 
-type Extracted = {
-  intake_code?: string | null;
-  salesperson?: string | null; customer?: string | null; product?: string | null;
-  quantity?: number | null; expected_revenue?: number | null; pipeline_stage?: string | null;
-  commitments?: Array<{ title: string; promise_date?: string | null; next_action?: string | null; risk?: string | null }>;
-  follow_up_date?: string | null; competitor?: string | null; sentiment?: string | null;
-  risk_level?: string | null; summary?: string | null;
-};
+// BulkRecord type comes from intake.functions via BulkIntakeTable import
 
 function IntakePage() {
-  const extract = useServerFn(extractAndSaveIntake);
+  const analyzeBulk = useServerFn(analyzeIntakeBulk);
+  const saveBulk = useServerFn(saveIntakeBulk);
   const transcribe = useServerFn(transcribeAudio);
   const qc = useQueryClient();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [preview, setPreview] = useState<Extracted | null>(null);
+  const [bulkRecords, setBulkRecords] = useState<BulkRecord[] | null>(null);
+  const [reviewSource, setReviewSource] = useState<"text" | "voice" | "file">("text");
   const mediaRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -50,21 +46,49 @@ function IntakePage() {
 
 
 
-  async function submit(source: "text" | "voice" | "file" = "text", fileName?: string) {
+  async function submit(source: "text" | "voice" | "file" = "text") {
     if (!text.trim()) { toast.error("Enter some text or record a note first."); return; }
     setBusy(true);
-    setPreview(null);
+    setBulkRecords(null);
+    setReviewSource(source);
     try {
-      const res = await extract({ data: { text, source, fileName, salespersonName: name ?? undefined, intakePrefix: myPrefix } });
-      setPreview(res.extracted as Extracted);
-      toast.success(`Intake ${res.intakeCode} tagged to ${name ?? "you"}`);
+      const res = await analyzeBulk({ data: { text, source, salespersonName: name ?? undefined, intakePrefix: myPrefix } });
+      const records = (res.records as BulkRecord[]).map((r) => ({ ...r, salesperson: name ?? r.salesperson ?? null }));
+      setBulkRecords(records);
+      toast.success(records.length === 1 ? "AI extraction ready — review and save." : `AI extracted ${records.length} records — review and save all.`);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "AI processing failed");
+    } finally { setBusy(false); }
+  }
+
+  function patchRecord(idx: number, field: keyof BulkRecord, value: BulkRecord[keyof BulkRecord]) {
+    setBulkRecords((prev) => {
+      if (!prev) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: value };
+      return next;
+    });
+  }
+
+  async function saveAll() {
+    if (!bulkRecords?.length) return;
+    setSaving(true);
+    try {
+      const res = await saveBulk({ data: {
+        records: bulkRecords.map((r) => ({ ...r, salesperson: name ?? r.salesperson ?? null })),
+        source: reviewSource as "text" | "voice" | "file" | "excel" | "whatsapp",
+        salespersonName: name ?? undefined,
+        intakePrefix: myPrefix,
+      }});
+      toast.success(`Saved ${res.count} intake${res.count !== 1 ? "s" : ""} successfully.`);
+      setBulkRecords(null);
       setText("");
       qc.invalidateQueries({ queryKey: ["commitments"] });
       qc.invalidateQueries({ queryKey: ["intakes-count"] });
       qc.invalidateQueries({ queryKey: ["intakes"] });
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : "AI processing failed");
-    } finally { setBusy(false); }
+      toast.error(e instanceof Error ? e.message : "Save failed");
+    } finally { setSaving(false); }
   }
 
   async function toggleRecord() {
@@ -124,52 +148,38 @@ function IntakePage() {
   async function handleExcel(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
     setBusy(true);
+    setBulkRecords(null);
     try {
       const XLSX = await import("xlsx");
       const buf = await f.arrayBuffer();
       const wb = XLSX.read(buf);
       const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]]);
       if (rows.length === 0) { toast.error("Sheet is empty."); return; }
-      const { data: u } = await supabase.auth.getUser();
-      const userId = u.user?.id;
-      if (!userId) throw new Error("Not signed in");
-      const intakeRows = rows.map((r) => ({
-        user_id: userId,
-        source: "excel" as const,
-        raw_text: JSON.stringify(r),
-        file_name: f.name,
-        extracted: r as never,
-        status: "imported",
+      const c = (r: Record<string, unknown>, k: string) =>
+        (r[k] ?? r[k.toLowerCase()] ?? r[k.toUpperCase()] ?? r[Object.keys(r).find(key => key.toLowerCase() === k.toLowerCase()) ?? ""] ?? undefined) as string | number | undefined;
+      const records: BulkRecord[] = rows.map((r) => ({
+        customer: String(c(r, "Customer") ?? c(r, "Customer Name") ?? "").trim() || null,
+        salesperson: String(c(r, "Salesperson") ?? c(r, "Sales Person") ?? "").trim() || name || null,
+        product: String(c(r, "Product") ?? c(r, "Product Name") ?? "").trim() || null,
+        quantity: c(r, "Quantity") != null ? Number(c(r, "Quantity")) : null,
+        expected_revenue: coerceMoneyToINR(c(r, "Revenue") ?? c(r, "Expected Revenue") ?? c(r, "Amount") ?? c(r, "Value"), JSON.stringify(r)) || null,
+        pipeline_stage: String(c(r, "Stage") ?? c(r, "Pipeline Stage") ?? "").trim() || null,
+        follow_up_date: normalizeDate(c(r, "Follow Up Date") ?? c(r, "Follow-up") ?? c(r, "Follow Up") ?? c(r, "Date")),
+        competitor: String(c(r, "Competitor") ?? "").trim() || null,
+        sentiment: String(c(r, "Sentiment") ?? "").trim() || null,
+        risk_level: String(c(r, "Risk") ?? c(r, "Risk Level") ?? "").trim() || null,
+        english_translation: String(c(r, "English Translation") ?? c(r, "Translation") ?? "").trim() || null,
+        summary: String(c(r, "Summary") ?? c(r, "Notes") ?? c(r, "Remarks") ?? c(r, "Description") ?? "").trim() || null,
+        commitments: (() => {
+          const title = String(c(r, "Commitment") ?? c(r, "Next Action") ?? "").trim();
+          if (!title) return [];
+          return [{ title, promise_date: normalizeDate(c(r, "Commitment Date")), next_action: null, risk: null }];
+        })(),
+        intake_code: null,
       }));
-      const { data: insertedIntakes, error: e1 } = await supabase.from("intakes").insert(intakeRows).select();
-      if (e1) throw e1;
-      const commitments = rows.flatMap((r, idx) => {
-        const c = (k: string) => (r[k] ?? r[k.toLowerCase()] ?? r[k.toUpperCase()]) as string | number | undefined;
-        const title = String(c("Commitment") ?? c("Next Action") ?? "").trim();
-        const revenue = coerceMoneyToINR(c("Revenue") ?? c("Expected Revenue") ?? c("Amount"), JSON.stringify(r));
-        const customer = String(c("Customer") ?? "").trim();
-        if (!title && revenue <= 0) return [];
-        return [{
-          user_id: userId,
-          assigned_to: userId,
-          intake_id: insertedIntakes?.[idx]?.id ?? null,
-          title: title || (customer ? `Pipeline opportunity - ${customer}` : "Pipeline opportunity from intake"),
-          customer: customer || null,
-          salesperson: String(c("Salesperson") ?? "") || null,
-          product: String(c("Product") ?? "") || null,
-          expected_revenue: revenue,
-          promise_date: normalizeDate(c("Commitment Date") ?? c("Date")),
-          next_action: String(c("Next Action") ?? "") || null,
-          status: "open" as const,
-        }];
-      });
-      if (commitments.length) {
-        const { error: e2 } = await supabase.from("commitments").insert(commitments);
-        if (e2) throw e2;
-      }
-      toast.success(`Imported ${rows.length} rows, created ${commitments.length} commitments.`);
-      qc.invalidateQueries({ queryKey: ["commitments"] });
-      qc.invalidateQueries({ queryKey: ["intakes-count"] });
+      setReviewSource("file");
+      setBulkRecords(records);
+      toast.success(records.length === 1 ? "Excel loaded — review and save." : `Loaded ${records.length} rows from Excel — review and save.`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Excel import failed");
     } finally { setBusy(false); e.target.value = ""; }
@@ -180,7 +190,7 @@ function IntakePage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">New intake</h1>
-          <p className="text-sm text-muted-foreground">Paste EOD reports, WhatsApp chats, or speak. AI will structure it.</p>
+          <p className="text-sm text-muted-foreground">Paste EOD reports, WhatsApp chats, or speak. Tamil and mixed-language notes are translated to English and split by customer.</p>
         </div>
         <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-semibold">
           <IdCard className="h-3.5 w-3.5 text-primary" />
@@ -229,45 +239,15 @@ function IntakePage() {
         </CardContent>
       </Card>
 
-      {preview && (
-        <Card className="card-soft border-0 shadow-none">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><FileText className="h-4 w-4 text-primary" /> AI extraction</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3">
-              <Field label="Customer" value={preview.customer} />
-              <Field label="Salesperson" value={preview.salesperson} />
-              <Field label="Product" value={preview.product} />
-              <Field label="Quantity" value={preview.quantity} />
-              <Field label="Expected revenue" value={preview.expected_revenue ? `₹${Number(preview.expected_revenue).toLocaleString()}` : null} />
-              <Field label="Stage" value={preview.pipeline_stage} />
-              <Field label="Follow-up" value={preview.follow_up_date} />
-              <Field label="Competitor" value={preview.competitor} />
-              <Field label="Sentiment" value={preview.sentiment} />
-              <Field label="Risk" value={preview.risk_level} />
-            </div>
-            {preview.summary && (<><Separator className="my-4" /><p className="text-sm leading-relaxed text-foreground/90">{preview.summary}</p></>)}
-            {preview.commitments && preview.commitments.length > 0 && (
-              <>
-                <Separator className="my-4" />
-                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Commitments created</div>
-                <div className="mt-2 space-y-2">
-                  {preview.commitments.map((c, i) => (
-                    <div key={i} className="rounded-lg border border-border bg-background/50 p-3 text-sm">
-                      <div className="font-medium">{c.title}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {c.promise_date && <>Promise: <span className="text-foreground/80">{c.promise_date}</span> · </>}
-                        {c.next_action && <>Next: <span className="text-foreground/80">{c.next_action}</span> · </>}
-                        {c.risk && <>Risk: <span className="text-foreground/80">{c.risk}</span></>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
+      {bulkRecords && bulkRecords.length > 0 && (
+        <BulkIntakeTable
+          records={bulkRecords}
+          loggedInName={name ?? ""}
+          saving={saving}
+          onPatch={patchRecord}
+          onSave={saveAll}
+          onCancel={() => { setBulkRecords(null); setText(""); }}
+        />
       )}
 
       <Card className="card-soft border-0 shadow-none">
@@ -283,7 +263,7 @@ function IntakePage() {
           ) : (
             <div className="space-y-2">
               {recentIntakes.slice(0, 8).map((i, idx) => {
-                const ext = (i.extracted ?? {}) as { intake_code?: string; customer?: string; salesperson?: string; expected_revenue?: number; summary?: string };
+                const ext = (i.extracted ?? {}) as { intake_code?: string; customer?: string; salesperson?: string; expected_revenue?: number; english_translation?: string; summary?: string };
                 const linked = allCommitments.filter((c) => c.intake_id === i.id).length;
                 const fallbackNum = recentIntakes.length - idx;
                 const code = ext.intake_code ?? `${myPrefix}${String(fallbackNum).padStart(3, "0")}`;
@@ -298,7 +278,7 @@ function IntakePage() {
                         {linked > 0 && <Badge className="bg-success/15 text-success border-success/30 text-[10px]">{linked} commitment{linked > 1 ? "s" : ""}</Badge>}
                       </div>
                       <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {ext.summary ?? i.raw_text ?? "—"}
+                        {ext.english_translation ?? ext.summary ?? i.raw_text ?? "—"}
                       </div>
                     </div>
                     <div className="flex items-center gap-3 text-xs">

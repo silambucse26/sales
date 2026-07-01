@@ -31,6 +31,7 @@ import {
   Bell,
   MessageSquare,
   Send,
+  Trash2,
 } from "lucide-react";
 import {
   DEFAULT_MONTHLY_TARGET_PER_REP,
@@ -41,17 +42,19 @@ import {
   useChatMessages,
   useMonthlyTarget,
   aggregateReps,
+  aggregateCustomers,
   fmtINR,
   effectiveStatus,
   type RepStats,
   type Commitment,
   type IntakeRow,
   type TeamMember,
+  type CustomerStats,
 } from "@/lib/sales-data";
 import { useAuth } from "@/lib/auth-context";
 import { ROLE_LABELS } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { changeUserRole } from "@/lib/admin.functions";
+import { changeUserRole, deleteDataOnlySalesperson, deleteSalesMember } from "@/lib/admin.functions";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -66,6 +69,14 @@ const EMPTY_STATS = {
   pipeline: 0,
   accuracy: 0,
   score: 0,
+};
+
+type SalesRepCard = RepStats & {
+  phone?: string;
+  roleLabel?: string;
+  memberId?: string;
+  memberRole?: TeamMember["role"];
+  dataOnly?: boolean;
 };
 
 function matchesMember(c: Commitment, member: Pick<TeamMember, "id" | "name">) {
@@ -97,6 +108,20 @@ function statsForCommitments(name: string, rows: Commitment[]): RepStats {
   return stats;
 }
 
+function statsWithCustomerValue(name: string, rows: Commitment[], customers: CustomerStats[]): RepStats {
+  const stats = statsForCommitments(name, rows);
+  const ownCustomers = customers.filter((c) => (c.rep ?? "").trim().toLowerCase() === name.trim().toLowerCase());
+  if (ownCustomers.length) {
+    stats.won = ownCustomers.reduce((s, c) => s + c.won, 0);
+    stats.pipeline = ownCustomers.reduce((s, c) => s + c.pipeline, 0);
+    stats.score = Math.min(
+      100,
+      Math.round(stats.accuracy * 0.6 + Math.log10(1 + stats.won) * 10 + Math.log10(1 + stats.pipeline) * 6),
+    );
+  }
+  return stats;
+}
+
 function SalesTeam() {
   const { data: commitments = [] } = useCommitments();
   const { data: intakes = [] } = useIntakes();
@@ -106,21 +131,15 @@ function SalesTeam() {
   const { data: notifications = [] } = useNotifications();
   const qc = useQueryClient();
   const doChangeRole = useServerFn(changeUserRole);
+  const doDeleteMember = useServerFn(deleteSalesMember);
+  const doDeleteDataOnly = useServerFn(deleteDataOnlySalesperson);
   const isMember = role === "sales_member";
   const isBH = role === "business_head";
   const selfView = !isBH;
   const [q, setQ] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [activityFilter, setActivityFilter] = useState("all");
-  const [open, setOpen] = useState<
-    | (RepStats & {
-        phone?: string;
-        roleLabel?: string;
-        memberId?: string;
-        memberRole?: TeamMember["role"];
-      })
-    | null
-  >(null);
+  const [open, setOpen] = useState<SalesRepCard | null>(null);
   const memberNameById = useMemo(
     () => new Map(members.map((m) => [m.id, m.name] as const)),
     [members],
@@ -134,6 +153,10 @@ function SalesTeam() {
       ).trim() || "Unassigned",
     [memberNameById],
   );
+  const customerStats = useMemo(
+    () => aggregateCustomers(commitments.map((c) => ({ ...c, salesperson: ownerNameFor(c) })), intakes),
+    [commitments, intakes, ownerNameFor],
+  );
   const databaseUsersWithStats = useMemo(() => {
     return members
       .map((u) => {
@@ -142,10 +165,10 @@ function SalesTeam() {
             c.assigned_to === u.id ||
             (c.salesperson ?? "").trim().toLowerCase() === u.name.toLowerCase(),
         );
-        return { ...u, stats: statsForCommitments(u.name, ownRows) };
+        return { ...u, stats: statsWithCustomerValue(u.name, ownRows, customerStats) };
       })
       .sort((a, b) => b.stats.won + b.stats.pipeline - (a.stats.won + a.stats.pipeline));
-  }, [commitments, members]);
+  }, [commitments, customerStats, members]);
 
   const monthByRep = useMemo(() => {
     const current = new Date();
@@ -162,16 +185,16 @@ function SalesTeam() {
     }
     return m;
   }, [commitments, ownerNameFor]);
-  const reps = useMemo(() => {
+  const reps = useMemo<SalesRepCard[]>(() => {
     if (selfView) {
       const ownRows = commitments.filter(
         (c) =>
           c.assigned_to === user?.id ||
           (c.salesperson ?? "").trim().toLowerCase() === (name ?? "").toLowerCase(),
       );
-      return [statsForCommitments(name ?? "You", ownRows)];
+      return [statsWithCustomerValue(name ?? "You", ownRows, customerStats)];
     }
-    if (isMember) return [statsForCommitments(name ?? "You", commitments)];
+    if (isMember) return [statsWithCustomerValue(name ?? "You", commitments, customerStats)];
     const assignedCommitmentIds = new Set<string>();
     const rows = members
       .filter((m) => m.role === "sales_member" || m.role === "sales_head")
@@ -179,7 +202,7 @@ function SalesTeam() {
         const ownRows = commitments.filter((c) => matchesMember(c, m));
         ownRows.forEach((c) => assignedCommitmentIds.add(c.id));
         return {
-          ...statsForCommitments(m.name, ownRows),
+          ...statsWithCustomerValue(m.name, ownRows, customerStats),
           phone: m.phone,
           roleLabel: m.role ? ROLE_LABELS[m.role] : undefined,
           memberId: m.id,
@@ -188,9 +211,9 @@ function SalesTeam() {
       });
     const unmatched = aggregateReps(
       commitments.filter((c) => !assignedCommitmentIds.has(c.id)),
-    ).map((r) => ({ ...r }));
+    ).map((r) => ({ ...r, dataOnly: true, roleLabel: "Data only" }));
     return [...rows, ...unmatched].sort((a, b) => b.score - a.score);
-  }, [commitments, isMember, members, name, selfView, user?.id]);
+  }, [commitments, customerStats, isMember, members, name, selfView, user?.id]);
   const merged = useMemo(() => {
     if (selfView)
       return reps.map((r) => ({
@@ -209,14 +232,7 @@ function SalesTeam() {
       }));
     return reps;
   }, [reps, isMember, phone, role, selfView, user?.id]);
-  const filtered: Array<
-    RepStats & {
-      phone?: string;
-      roleLabel?: string;
-      memberId?: string;
-      memberRole?: TeamMember["role"];
-    }
-  > = selfView || isMember
+  const filtered: SalesRepCard[] = selfView || isMember
     ? merged
     : merged.filter((r) => {
         if (q && !(r.name.toLowerCase().includes(q.toLowerCase()) || (r.phone ?? "").includes(q)))
@@ -232,6 +248,39 @@ function SalesTeam() {
     (c) => c.status !== "completed" && c.promise_date === tomorrow,
   );
   const unread = notifications.filter((n) => !n.read_at);
+
+  async function deleteMember(userId: string, memberName: string) {
+    if (!confirm(`Delete ${memberName} and all their commitments, intakes, messages, and login account?`)) return;
+    try {
+      const res = await doDeleteMember({ data: { userId } });
+      toast.success(`Deleted ${memberName}`, {
+        description: `${res.deletedCommitments} commitments and ${res.deletedIntakes} intakes removed.`,
+      });
+      qc.invalidateQueries({ queryKey: ["team-members"] });
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      setOpen(null);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
+
+  async function deleteDataOnlyRep(memberName: string) {
+    if (!confirm(`Delete all filled/imported data for ${memberName}?`)) return;
+    try {
+      const res = await doDeleteDataOnly({ data: { name: memberName } });
+      toast.success(`Deleted filled data for ${memberName}`, {
+        description: `${res.deletedCommitments} commitments and ${res.deletedIntakes} intakes removed.`,
+      });
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      setOpen(null);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -363,6 +412,17 @@ function SalesTeam() {
                       <Mini label="Pipeline" value={fmtINR(u.stats.pipeline)} tone="info" />
                       <Mini label="Revenue won" value={fmtINR(u.stats.won)} tone="success" />
                     </div>
+                    {u.id !== user?.id && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="destructive"
+                        className="mt-3 w-full"
+                        onClick={() => deleteMember(u.id, u.name)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> Delete member data
+                      </Button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -411,7 +471,14 @@ function SalesTeam() {
           const scoreTone =
             r.score >= 70 ? "text-success" : r.score >= 40 ? "text-warning" : "text-destructive";
           return (
-            <button key={r.name} onClick={() => setOpen(r)} className="text-left">
+            <div
+              key={r.name}
+              role="button"
+              tabIndex={0}
+              onClick={() => setOpen(r)}
+              onKeyDown={(e) => { if (e.key === "Enter") setOpen(r); }}
+              className="text-left"
+            >
               <Card
                 className={cn(
                   "card-soft border-0 shadow-none hover:shadow-lg hover:-translate-y-0.5 transition-all overflow-hidden",
@@ -506,6 +573,11 @@ function SalesTeam() {
                     <Badge variant="outline" className="text-[10px]">
                       {r.commitments} total
                     </Badge>
+                    {r.dataOnly && (
+                      <Badge variant="outline" className="border-warning/40 text-warning-foreground text-[10px]">
+                        No login profile
+                      </Badge>
+                    )}
                     {monthStats.pipeline > 0 && (
                       <Badge className="bg-info/15 text-info border-info/30 text-[10px]">
                         {fmtINR(monthStats.pipeline)} month pipeline
@@ -524,9 +596,23 @@ function SalesTeam() {
                     <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary mt-0.5" />
                     <span>{coachingFor(r)}</span>
                   </div>
+                  {isBH && r.dataOnly && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      className="w-full"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteDataOnlyRep(r.name);
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" /> Delete filled data
+                    </Button>
+                  )}
                 </CardContent>
               </Card>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -542,6 +628,8 @@ function SalesTeam() {
               commitments={commitments}
               intakes={intakes}
               canManageRole={isBH && !!open.memberId}
+              canDeleteMember={isBH && !!open.memberId && open.memberId !== user?.id}
+              canDeleteDataOnly={isBH && !!open.dataOnly}
               onRoleChange={async (newRole) => {
                 if (!open.memberId) return;
                 try {
@@ -552,6 +640,13 @@ function SalesTeam() {
                 } catch (e: unknown) {
                   toast.error(e instanceof Error ? e.message : "Failed");
                 }
+              }}
+              onDeleteMember={async () => {
+                if (!open.memberId) return;
+                await deleteMember(open.memberId, open.name);
+              }}
+              onDeleteDataOnly={async () => {
+                await deleteDataOnlyRep(open.name);
               }}
             />
           )}
@@ -651,18 +746,21 @@ function RepProfile({
   commitments,
   intakes,
   canManageRole,
+  canDeleteMember,
+  canDeleteDataOnly,
   onRoleChange,
+  onDeleteMember,
+  onDeleteDataOnly,
 }: {
-  rep: RepStats & {
-    phone?: string;
-    roleLabel?: string;
-    memberId?: string;
-    memberRole?: TeamMember["role"];
-  };
+  rep: SalesRepCard;
   commitments: Commitment[];
   intakes: IntakeRow[];
   canManageRole?: boolean;
+  canDeleteMember?: boolean;
+  canDeleteDataOnly?: boolean;
   onRoleChange?: (role: "business_head" | "sales_head" | "sales_member") => void;
+  onDeleteMember?: () => void;
+  onDeleteDataOnly?: () => void;
 }) {
   const own = (commitments ?? []).filter(
     (c) =>
@@ -699,7 +797,7 @@ function RepProfile({
 
   return (
     <div className="space-y-4">
-      {(rep.phone || rep.roleLabel || canManageRole) && (
+      {(rep.phone || rep.roleLabel || canManageRole || canDeleteMember || canDeleteDataOnly) && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
           {rep.roleLabel && (
             <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 font-medium text-primary">
@@ -732,6 +830,16 @@ function RepProfile({
                 </SelectContent>
               </Select>
             </div>
+          )}
+          {canDeleteMember && onDeleteMember && (
+            <Button type="button" size="sm" variant="destructive" className={cn(canManageRole ? "" : "ml-auto")} onClick={onDeleteMember}>
+              <Trash2 className="h-3.5 w-3.5" /> Delete member data
+            </Button>
+          )}
+          {canDeleteDataOnly && onDeleteDataOnly && (
+            <Button type="button" size="sm" variant="destructive" className={cn(canManageRole || canDeleteMember ? "" : "ml-auto")} onClick={onDeleteDataOnly}>
+              <Trash2 className="h-3.5 w-3.5" /> Delete filled data
+            </Button>
           )}
         </div>
       )}

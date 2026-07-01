@@ -37,6 +37,31 @@ export const updateCommitmentStatus = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+export const deleteCommitment = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z.object({
+      id: z.string().uuid(),
+    }).parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    const { data: myRole, error: roleError } = await context.supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", context.userId)
+      .maybeSingle();
+    if (roleError) throw new Error(roleError.message);
+    if (myRole?.role !== "business_head") {
+      throw new Error("Only Business Head can delete commitments.");
+    }
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    await supabaseAdmin.from("notifications").delete().eq("commitment_id", data.id);
+    const { error } = await supabaseAdmin.from("commitments").delete().eq("id", data.id);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
 export const createCommitment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) =>

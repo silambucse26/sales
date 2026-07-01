@@ -50,12 +50,23 @@ export async function signOut() {
 }
 
 export async function fetchMyRole(userId: string): Promise<AppRole | null> {
-  const { data } = await supabase
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", userId)
-    .order("role", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  return (data?.role as AppRole) ?? null;
+  try {
+    const { data, error } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", userId)
+      .order("role", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error("[Auth] Failed to load user role", error);
+      return null;
+    }
+
+    return (data?.role as AppRole) ?? null;
+  } catch (error) {
+    console.error("[Auth] Failed to load user role", error);
+    return null;
+  }
 }

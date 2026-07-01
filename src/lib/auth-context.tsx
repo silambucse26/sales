@@ -24,13 +24,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function hydrate(u: User | null) {
     setUser(u);
     if (!u) { setRole(null); setName(null); setPhone(null); return; }
-    const [r, p] = await Promise.all([
+    const [roleResult, profileResult] = await Promise.allSettled([
       fetchMyRole(u.id),
       supabase.from("profiles").select("name,phone").eq("id", u.id).maybeSingle(),
     ]);
-    setRole(r);
-    setName(p.data?.name ?? null);
-    setPhone(p.data?.phone ?? null);
+
+    setRole(roleResult.status === "fulfilled" ? roleResult.value : null);
+
+    if (roleResult.status === "rejected") {
+      console.error("[Auth] Failed to hydrate user role", roleResult.reason);
+    }
+
+    if (profileResult.status === "fulfilled") {
+      const { data, error } = profileResult.value;
+      if (error) {
+        console.error("[Auth] Failed to load user profile", error);
+      }
+      setName(data?.name ?? null);
+      setPhone(data?.phone ?? null);
+    } else {
+      console.error("[Auth] Failed to hydrate user profile", profileResult.reason);
+      setName(null);
+      setPhone(null);
+    }
   }
 
   useEffect(() => {
