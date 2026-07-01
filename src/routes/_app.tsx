@@ -104,9 +104,9 @@ function AppShell() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen overflow-x-hidden bg-background">
       <Sidebar />
-      <div className="lg:pl-64">
+      <div className="min-w-0 lg:pl-64">
         <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border bg-background/80 px-4 backdrop-blur lg:px-8">
           <Sheet>
             <SheetTrigger asChild>
@@ -115,7 +115,7 @@ function AppShell() {
             <SheetContent side="left" className="w-64 p-0"><SidebarContent /></SheetContent>
           </Sheet>
           <div className="flex-1" />
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-1.5 sm:gap-3">
             <NotificationBell />
             <ThemeToggle />
             <div className="hidden text-right sm:block">
@@ -130,7 +130,7 @@ function AppShell() {
             </Button>
           </div>
         </header>
-        <main className="px-4 py-6 lg:px-8 lg:py-8"><Outlet /></main>
+        <main className="min-w-0 px-3 py-5 sm:px-4 sm:py-6 lg:px-8 lg:py-8"><Outlet /></main>
       </div>
     </div>
   );

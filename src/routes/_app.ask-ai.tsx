@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Sparkles, Loader2, ArrowRight, AlertTriangle, Target, User, Calendar, Mic, Square } from "lucide-react";
 import { toast } from "sonner";
 import { askAi } from "@/lib/ai-assistant.functions";
@@ -38,6 +39,7 @@ function AskAi() {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [history, setHistory] = useState<Array<{ q: string; a: Answer }>>([]);
+  const [popup, setPopup] = useState<{ q: string; a: Answer } | null>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
@@ -78,6 +80,7 @@ function AskAi() {
     try {
       const a = await ask({ data: { question } }) as Answer;
       setHistory((h) => [{ q: question, a }, ...h]);
+      setPopup({ q: question, a });
       setQ("");
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "AI failed");
@@ -151,6 +154,15 @@ function AskAi() {
           </Card>
         ))}
       </div>
+
+      <Dialog open={!!popup} onOpenChange={(open) => !open && setPopup(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="pr-8 text-base leading-snug">{popup?.q}</DialogTitle>
+          </DialogHeader>
+          {popup && <AnswerDetails answer={popup.a} />}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -219,6 +231,38 @@ function readableText(value: string) {
     .replace(/\\n/g, " ")
     .replace(/\\"/g, '"')
     .trim();
+}
+
+function AnswerDetails({ answer }: { answer: Answer }) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm">
+        <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase text-primary">
+          <Sparkles className="h-3.5 w-3.5" /> Answer
+        </div>
+        <p className="leading-relaxed text-foreground/90">{readableText(answer.answer)}</p>
+      </div>
+      {answer.evidence && answer.evidence.length > 0 && (
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Evidence</div>
+          <ul className="space-y-1 text-sm">
+            {answer.evidence.map((e, idx) => (
+              <li key={idx} className="flex items-start gap-2">
+                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
+                <span className="min-w-0">{readableText(e)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="grid gap-2 sm:grid-cols-2">
+        {answer.risk && <Pill icon={AlertTriangle} label="Risk" value={answer.risk} tone="destructive" />}
+        {answer.action_required && <Pill icon={Target} label="Action" value={answer.action_required} tone="primary" />}
+        {answer.responsible && <Pill icon={User} label="Responsible" value={answer.responsible} />}
+        {answer.follow_up_date && <Pill icon={Calendar} label="Follow-up" value={answer.follow_up_date} tone="info" />}
+      </div>
+    </div>
+  );
 }
 
 function Pill({ icon: Icon, label, value, tone }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; tone?: "destructive"|"primary"|"info" }) {
