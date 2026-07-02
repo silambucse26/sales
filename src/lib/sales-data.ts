@@ -103,7 +103,7 @@ export function useCommitments() {
       }
       const { data, error } = await query;
       if (error) throw error;
-      return (data ?? []) as Commitment[];
+      return normalizeManualFinancialAdjustments((data ?? []) as Commitment[]);
     },
     enabled: !!user,
   });
@@ -245,6 +245,7 @@ export type CustomerStats = {
   relationship: number; // 0-100
   buyingProb: number;   // 0-100
   rep: string | null;
+  products: string[];
 };
 
 export function aggregateCustomers(commitments: Commitment[], intakes: IntakeRow[]): CustomerStats[] {
@@ -252,9 +253,10 @@ export function aggregateCustomers(commitments: Commitment[], intakes: IntakeRow
   for (const c of commitments) {
     const name = (c.customer ?? "").trim();
     if (!name) continue;
-    m[name] ??= { name, commitments: 0, open: 0, missed: 0, pipeline: 0, won: 0, lastTouch: null, competitor: null, relationship: 60, buyingProb: 50, rep: null };
+    m[name] ??= { name, commitments: 0, open: 0, missed: 0, pipeline: 0, won: 0, lastTouch: null, competitor: null, relationship: 60, buyingProb: 50, rep: null, products: [] };
     m[name].commitments++;
     m[name].rep = m[name].rep ?? c.salesperson;
+    addUnique(m[name].products, c.product);
     const eff = effectiveStatus(c);
     if (c.status === "completed") m[name].won += Number(c.expected_revenue ?? 0);
     else if (eff === "missed") { m[name].missed++; m[name].relationship -= 5; }
@@ -262,10 +264,11 @@ export function aggregateCustomers(commitments: Commitment[], intakes: IntakeRow
     if (!m[name].lastTouch || (c.created_at && c.created_at > m[name].lastTouch!)) m[name].lastTouch = c.created_at;
   }
   for (const i of intakes) {
-    const ext = (i.extracted ?? {}) as { customer?: string | null; competitor?: string | null; sentiment?: string | null };
+    const ext = (i.extracted ?? {}) as { customer?: string | null; product?: string | null; competitor?: string | null; sentiment?: string | null };
     const name = ext.customer?.trim();
     if (!name) continue;
-    m[name] ??= { name, commitments: 0, open: 0, missed: 0, pipeline: 0, won: 0, lastTouch: i.created_at, competitor: null, relationship: 60, buyingProb: 50, rep: null };
+    m[name] ??= { name, commitments: 0, open: 0, missed: 0, pipeline: 0, won: 0, lastTouch: i.created_at, competitor: null, relationship: 60, buyingProb: 50, rep: null, products: [] };
+    addUnique(m[name].products, ext.product);
     if (ext.competitor) m[name].competitor = ext.competitor;
     if (ext.sentiment === "Positive") m[name].relationship += 3;
     if (ext.sentiment === "Negative") m[name].relationship -= 4;
@@ -277,4 +280,60 @@ export function aggregateCustomers(commitments: Commitment[], intakes: IntakeRow
     c.buyingProb = Math.max(5, Math.min(95, Math.round(winRatio + (c.open - c.missed) * 4)));
     return c;
   }).sort((a, b) => (b.pipeline + b.won) - (a.pipeline + a.won));
+}
+
+function normalizeManualFinancialAdjustments(rows: Commitment[]) {
+  const adjustments = rows.filter(isManualFinancialAdjustment);
+  if (adjustments.length === 0) return rows;
+
+  const normalized = rows.filter((row) => !isManualFinancialAdjustment(row)).map((row) => ({ ...row }));
+  for (const adjustment of adjustments) {
+    const customer = (adjustment.customer ?? "").trim().toLowerCase();
+    if (!customer) {
+      normalized.push(adjustment);
+      continue;
+    }
+
+    const isRevenue = adjustment.title.trim().toLowerCase().startsWith("revenue adjustment -");
+    const candidates = normalized.filter((row) => {
+      if ((row.customer ?? "").trim().toLowerCase() !== customer) return false;
+      return isRevenue ? row.status === "completed" : row.status !== "completed" && effectiveStatus(row) !== "missed";
+    });
+    if (candidates.length === 0) {
+      normalized.push(adjustment);
+      continue;
+    }
+    applyDisplayDelta(candidates, Math.round(Number(adjustment.expected_revenue ?? 0)));
+  }
+
+  return normalized;
+}
+
+function isManualFinancialAdjustment(row: Commitment) {
+  const title = row.title.trim().toLowerCase();
+  return row.remarks === "Manual customer edit" && (title.startsWith("pipeline adjustment -") || title.startsWith("revenue adjustment -"));
+}
+
+function applyDisplayDelta(rows: Commitment[], delta: number) {
+  if (delta === 0 || rows.length === 0) return;
+  if (delta > 0) {
+    const row = rows.find((r) => Number(r.expected_revenue ?? 0) > 0) ?? rows[0];
+    row.expected_revenue = Math.round(Number(row.expected_revenue ?? 0) + delta);
+    return;
+  }
+
+  let remainingDecrease = Math.abs(delta);
+  for (const row of rows) {
+    const current = Math.round(Number(row.expected_revenue ?? 0));
+    const decrease = Math.min(Math.max(current, 0), remainingDecrease);
+    row.expected_revenue = current - decrease;
+    remainingDecrease -= decrease;
+    if (remainingDecrease <= 0) return;
+  }
+  rows[0].expected_revenue = Math.round(Number(rows[0].expected_revenue ?? 0) - remainingDecrease);
+}
+
+function addUnique(list: string[], value?: string | null) {
+  const item = value?.trim();
+  if (item && !list.some((existing) => existing.toLowerCase() === item.toLowerCase())) list.push(item);
 }

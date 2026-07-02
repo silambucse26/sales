@@ -9,12 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle, LayoutGrid, Table2, Trash2, Save } from "lucide-react";
+import { Search, Sparkles, Building2, TrendingUp, Heart, Plus, IndianRupee, Loader2, User, CalendarDays, XCircle, LayoutGrid, Table2, Trash2, Save, Pencil, Check, X } from "lucide-react";
 import { useCommitments, useIntakes, useTeamMembers, aggregateCustomers, fmtINR, effectiveStatus, type CustomerStats, type Commitment, type IntakeRow, type TeamMember } from "@/lib/sales-data";
 import { useAuth } from "@/lib/auth-context";
 import { salesCode } from "@/lib/auth";
 import { createCommitment } from "@/lib/commitments.functions";
-import { deleteCustomer, deleteIntake, setCustomerFinancials } from "@/lib/customer.functions";
+import { deleteCustomer, deleteIntake, setCustomerFinancials, updateIntakeCustomerName } from "@/lib/customer.functions";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -58,6 +58,7 @@ function Customers() {
       .map((i) => {
         const ext = (i.extracted ?? {}) as {
           customer?: string | null;
+          product?: string | null;
           salesperson?: string | null;
           intake_code?: string | null;
           summary?: string | null;
@@ -65,6 +66,7 @@ function Customers() {
         return {
           id: i.id,
           customer: ext.customer?.trim() || "Unknown customer",
+          product: ext.product?.trim() || null,
           salesperson: ext.salesperson?.trim() || "You",
           code: ext.intake_code ?? "—",
           summary: ext.summary ?? i.raw_text ?? "",
@@ -136,6 +138,7 @@ function Customers() {
                     <div className="min-w-0">
                       <CardTitle className="flex items-center gap-2 truncate text-base"><Building2 className="h-4 w-4 text-primary" /> {c.name}</CardTitle>
                       <div className="mt-0.5 text-xs text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                      {c.products.length > 0 && <div className="mt-0.5 truncate text-xs text-muted-foreground">Product: {productLabel(c.products)}</div>}
                       <div className="mt-0.5 text-xs text-muted-foreground">Uploaded {latestUpload ? formatDateTime(latestUpload.created_at) : "—"}</div>
                     </div>
                     <Badge variant="outline" className={cn("text-[10px]", risk === "High" ? "border-destructive/40 text-destructive" : risk === "Medium" ? "border-warning/40 text-warning-foreground" : "border-success/40 text-success-foreground")}>{risk} risk</Badge>
@@ -175,9 +178,36 @@ function RecentlyAdded({
   customers,
   onOpen,
 }: {
-  customers: Array<{ id: string; customer: string; salesperson: string; code: string; summary: string; createdAt: string }>;
+  customers: Array<{ id: string; customer: string; product: string | null; salesperson: string; code: string; summary: string; createdAt: string }>;
   onOpen: (customerName: string) => void;
 }) {
+  const qc = useQueryClient();
+  const renameIntake = useServerFn(updateIntakeCustomerName);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  async function saveCustomerName(id: string) {
+    const customer = draftName.trim();
+    if (!customer) {
+      toast.error("Enter customer name");
+      return;
+    }
+    setSavingId(id);
+    try {
+      await renameIntake({ data: { id, customer } });
+      toast.success("Customer name updated");
+      setEditingId(null);
+      setDraftName("");
+      qc.invalidateQueries({ queryKey: ["intakes"] });
+      qc.invalidateQueries({ queryKey: ["commitments"] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setSavingId(null);
+    }
+  }
+
   return (
     <Card className="card-soft border-0 shadow-none xl:sticky xl:top-4 xl:self-start">
       <CardHeader className="pb-2">
@@ -189,23 +219,99 @@ function RecentlyAdded({
         {customers.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No recent customer intakes.</p>
         ) : (
-          customers.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onOpen(item.customer)}
-              className="w-full rounded-lg border border-border bg-background/50 p-2.5 text-left text-sm hover:border-primary/40 hover:bg-primary/5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-semibold">{item.customer}</span>
-                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[10px] text-primary">
-                  {item.code}
-                </span>
+          customers.map((item) => {
+            const isEditing = editingId === item.id;
+            return (
+              <div
+                key={item.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => !isEditing && onOpen(item.customer)}
+                onKeyDown={(e) => {
+                  if (!isEditing && (e.key === "Enter" || e.key === " ")) onOpen(item.customer);
+                }}
+                className="w-full rounded-lg border border-border bg-background/50 p-2.5 text-left text-sm hover:border-primary/40 hover:bg-primary/5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  {isEditing ? (
+                    <Input
+                      autoFocus
+                      value={draftName}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setDraftName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveCustomerName(item.id);
+                        if (e.key === "Escape") {
+                          setEditingId(null);
+                          setDraftName("");
+                        }
+                      }}
+                      className="h-8 min-w-0 text-sm font-semibold"
+                      placeholder="Customer name"
+                    />
+                  ) : (
+                    <span className="truncate font-semibold">{item.customer}</span>
+                  )}
+                  <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                    {isEditing ? (
+                      <>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 text-success hover:text-success"
+                          disabled={savingId === item.id}
+                          onClick={() => saveCustomerName(item.id)}
+                          title="Save customer name"
+                          aria-label="Save customer name"
+                        >
+                          {savingId === item.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7"
+                          disabled={savingId === item.id}
+                          onClick={() => {
+                            setEditingId(null);
+                            setDraftName("");
+                          }}
+                          title="Cancel"
+                          aria-label="Cancel"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[10px] text-primary">
+                          {item.code}
+                        </span>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7"
+                          onClick={() => {
+                            setEditingId(item.id);
+                            setDraftName(item.customer === "Unknown customer" ? "" : item.customer);
+                          }}
+                          title="Edit customer name"
+                          aria-label="Edit customer name"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {item.product && <div className="mt-0.5 truncate text-xs text-muted-foreground">Product: {item.product}</div>}
+                <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</div>
+                <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.summary}</div>
               </div>
-              <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</div>
-              <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.summary}</div>
-            </button>
-          ))
+            );
+          })
         )}
       </CardContent>
     </Card>
@@ -221,10 +327,11 @@ function CustomerTable({ customers, intakes, onOpen }: { customers: CustomerStat
     <Card className="card-soft border-0 shadow-none">
       <CardContent className="p-0">
         <div className="overflow-x-auto">
-          <div className="min-w-[840px]">
-            <div className="grid grid-cols-[1.4fr_1fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="min-w-[980px]">
+            <div className="grid grid-cols-[1.4fr_1fr_1.2fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               <div>Customer</div>
               <div>Salesperson</div>
+              <div>Product</div>
               <div>Upload time</div>
               <div className="text-right">Pipeline</div>
               <div className="text-right">Won</div>
@@ -239,10 +346,11 @@ function CustomerTable({ customers, intakes, onOpen }: { customers: CustomerStat
                   key={c.name}
                   type="button"
                   onClick={() => onOpen(c)}
-                  className="grid w-full grid-cols-[1.4fr_1fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border/70 px-4 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
+                  className="grid w-full grid-cols-[1.4fr_1fr_1.2fr_1.2fr_1fr_1fr_0.7fr_0.7fr_0.7fr] gap-3 border-b border-border/70 px-4 py-2 text-left text-sm last:border-b-0 hover:bg-muted/25"
                 >
                   <div className="truncate font-medium">{c.name}</div>
                   <div className="truncate text-muted-foreground">{c.rep ?? "Unassigned"}</div>
+                  <div className="truncate text-muted-foreground">{productLabel(c.products)}</div>
                   <div className="truncate text-xs text-muted-foreground">{latestUpload ? formatDateTime(latestUpload.created_at) : "—"}</div>
                   <div className="text-right font-semibold text-info">{fmtINR(c.pipeline)}</div>
                   <div className="text-right font-semibold text-success">{fmtINR(c.won)}</div>
@@ -267,7 +375,12 @@ function CustomerProfile({ cust, commitments, intakes, members, onDeleted }: { c
   });
   const latestIntake = [...ownIntakes].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const latestExt = (latestIntake?.extracted ?? {}) as { intake_code?: string };
-  const products = Array.from(new Set(own.map((c) => c.product).filter(Boolean))) as string[];
+  const products = Array.from(new Set([
+    ...cust.products,
+    ...own.map((c) => c.product),
+    ...ownIntakes.map((i) => ((i.extracted ?? {}) as { product?: string | null }).product),
+  ].map((product) => product?.trim()).filter((product): product is string => Boolean(product))));
+  const firstProduct = products[0] ?? null;
   const { user, role, name, phone } = useAuth();
   const myCode = salesCode(name, phone);
   const canAssign = role === "business_head" || role === "sales_head";
@@ -305,7 +418,8 @@ function CustomerProfile({ cust, commitments, intakes, members, onDeleted }: { c
       await create({ data: {
         title: kind === "won" ? `Revenue won from ${cust.name}` : `Pipeline update — ${cust.name}`,
         customer: cust.name,
-        salesperson: canAssign ? undefined : myCode,
+        product: firstProduct || undefined,
+        salesperson: cust.rep ?? (canAssign ? undefined : myCode),
         expected_revenue: amt,
         status: kind === "won" ? "completed" : "open",
         remarks: note || undefined,
@@ -328,7 +442,7 @@ function CustomerProfile({ cust, commitments, intakes, members, onDeleted }: { c
         pipeline: Number(targetPipeline) || 0,
         won: Number(targetWon) || 0,
         assigned_to: assignedTo || undefined,
-        salesperson: canAssign ? (assignableMembers.find((m) => m.id === assignedTo)?.name ?? cust.rep ?? undefined) : myCode,
+        salesperson: cust.rep ?? (canAssign ? (assignableMembers.find((m) => m.id === assignedTo)?.name ?? undefined) : myCode),
       } });
       toast.success("Customer values updated");
       setEditingTotals(false);
@@ -409,6 +523,19 @@ function CustomerProfile({ cust, commitments, intakes, members, onDeleted }: { c
         <Mini label="Latest visit" value={latestIntake ? formatDateTime(latestIntake.created_at) : "—"} />
         <Mini label="Products" value={products.length || "—"} />
       </div>
+
+      {products.length > 0 && (
+        <div className="rounded-lg border border-border bg-background/60 p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Products</div>
+          <div className="flex flex-wrap gap-1.5">
+            {products.map((product) => (
+              <Badge key={product} variant="secondary" className="max-w-full truncate">
+                {product}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/5 to-info/5 p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -498,6 +625,12 @@ function latestIntakeForCustomer(customerName: string, intakes: IntakeRow[]) {
 function intakeCustomer(i: IntakeRow) {
   const ext = (i.extracted ?? {}) as { customer?: string | null };
   return ext.customer?.trim() ?? "";
+}
+
+function productLabel(products: string[]) {
+  if (products.length === 0) return "-";
+  const visible = products.slice(0, 2).join(", ");
+  return products.length > 2 ? `${visible} +${products.length - 2} more` : visible;
 }
 
 function isOwnCommitment(c: Commitment, userId?: string, name?: string | null, code?: string) {

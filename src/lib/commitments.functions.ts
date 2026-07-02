@@ -87,7 +87,7 @@ export const createCommitment = createServerFn({ method: "POST" })
         .select("name,phone")
         .eq("id", data.assigned_to)
         .maybeSingle();
-      salesperson = assignee?.name ?? salesperson;
+      salesperson = salesperson ?? assignee?.name ?? null;
     }
 
     const { data: row, error } = await context.supabase
