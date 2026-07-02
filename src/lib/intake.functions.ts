@@ -21,12 +21,25 @@ function parseExpectedRevenueInput(value: unknown) {
   return value;
 }
 
+function parseQuantityInput(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim()) {
+    const match = value.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+    if (match) {
+      const n = Number(match[0]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return value;
+}
+
 const ExtractedSchema = z.object({
   salesperson: z.string().nullable().optional(),
   intake_code: z.string().nullable().optional(),
   customer: z.string().nullable().optional(),
   product: z.string().nullable().optional(),
-  quantity: z.number().nullable().optional(),
+  quantity: z.preprocess(parseQuantityInput, z.number().nullable().optional()),
   expected_revenue: z.preprocess(parseExpectedRevenueInput, z.number().nullable().optional()),
   pipeline_stage: z.string().nullable().optional(),
   commitments: z
@@ -36,7 +49,7 @@ const ExtractedSchema = z.object({
         promise_date: z.string().nullable().optional(),
         next_action: z.string().nullable().optional(),
         risk: z.string().nullable().optional(),
-      })
+      }),
     )
     .default([]),
   follow_up_date: z.string().nullable().optional(),
@@ -204,7 +217,7 @@ const BulkAnalyzeInput = z.object({
 const BulkRecordSchema = z.object({
   customer: z.string().nullable().optional(),
   product: z.string().nullable().optional(),
-  quantity: z.number().nullable().optional(),
+  quantity: z.preprocess(parseQuantityInput, z.number().nullable().optional()),
   expected_revenue: z.preprocess(parseExpectedRevenueInput, z.number().nullable().optional()),
   pipeline_stage: z.string().nullable().optional(),
   commitments: z.array(z.object({
